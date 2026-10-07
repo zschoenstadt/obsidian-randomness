@@ -253,6 +253,9 @@ export class Evaluator {
         // Register tables from main and extras
         for (const f of [file, ...extraFiles]) {
             for (const t of f.tables) {
+                if (t.query) {
+                    throw new Error(`QueryTable '${t.name}' must be prepared with a native query provider before evaluation.`);
+                }
                 this.tables.set(t.name.toLowerCase(), t);
             }
         }

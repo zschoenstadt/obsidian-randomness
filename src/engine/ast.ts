@@ -37,6 +37,7 @@ export type PromptDecl = {
 
 export type TableDecl = {
     name: string;
+    query?: { source: string; line: number; path?: string };
     type: "weighted" | "lookup" | "dictionary";
     rollExpr?: string;                    // Lookup tables: raw roll source, e.g. "1d10"
     defaultValue?: string;                // Default: line; raw source

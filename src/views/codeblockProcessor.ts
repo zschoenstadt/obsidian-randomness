@@ -31,6 +31,7 @@ import {
     MarkdownRenderChild,
 } from "obsidian";
 import { Evaluator } from "../engine/evaluator";
+import { prepareVaultQueryTables } from "./queryTableSource";
 import { resolveBundle } from "../resolver/fileResolver";
 import { prefetchUseGraph } from "../resolver/asyncPrefetcher";
 import { discoverReferencedTables } from "../resolver/autoDiscover";
@@ -242,7 +243,7 @@ class RandomnessCodeblockChild extends MarkdownRenderChild {
             await this.plugin.vaultIndex.prewarm();
             const discovered = await discoverReferencedTables({
                 main: bundle.main,
-                extras: bundle.extras,
+                extras,
                 alreadyLoaded: bundle.loadedPaths,
                 resolveTableName: (n) =>
                     this.plugin.vaultIndex.resolveTable(n),
@@ -250,7 +251,7 @@ class RandomnessCodeblockChild extends MarkdownRenderChild {
                 generatorRoot: settings.generatorRoot || undefined,
             });
             if (discovered.length > 0) {
-                extras = [...bundle.extras, ...discovered];
+                extras = [...extras, ...discovered];
             }
         }
 
@@ -288,7 +289,8 @@ class RandomnessCodeblockChild extends MarkdownRenderChild {
                   false
               )
             : undefined;
-        const evaluator = new Evaluator(bundle.main, extras, {
+        const prepared = await prepareVaultQueryTables(this.plugin, { ...bundle, extras }, seed);
+        const evaluator = new Evaluator(prepared.main, prepared.extras, {
             seed,
             promptValues: this.promptValues,
             deckHost: hosts?.deckHost,

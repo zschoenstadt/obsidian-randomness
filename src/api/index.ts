@@ -33,6 +33,7 @@ import { vaultFileSource } from "../views/vaultFileSource";
 import { discoverGenerators } from "../views/browserView";
 import { collectTablesFromBundle } from "../views/tableAutocomplete";
 import { Evaluator } from "../engine/evaluator";
+import { prepareVaultQueryTables } from "../views/queryTableSource";
 import { RNG } from "../engine/rng";
 import { dirname } from "../resolver/fileResolver";
 import type RandomnessPlugin from "../views/main";
@@ -504,9 +505,10 @@ export function createApi(plugin: RandomnessPlugin): RandomnessAPI {
             //    non-identifier characters work without needing to
             //    round-trip through expression syntax that would
             //    whitespace-split them.
+            const prepared = await prepareVaultQueryTables(plugin, bundle, opts?.seed);
             const evaluator = new Evaluator(
-                bundle.main,
-                bundle.extras,
+                prepared.main,
+                prepared.extras,
                 {
                     seed: opts?.seed,
                     promptValues: opts?.promptValues,

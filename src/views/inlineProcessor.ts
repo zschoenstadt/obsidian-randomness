@@ -31,6 +31,7 @@ import {
 } from "obsidian";
 import { makeEditorSafe } from "./editorSafeControls";
 import { Evaluator } from "../engine/evaluator";
+import { prepareVaultQueryTables } from "./queryTableSource";
 import { buildInlineBundle } from "../resolver/scope";
 import { prefetchUseGraph } from "../resolver/asyncPrefetcher";
 import { discoverReferencedTables } from "../resolver/autoDiscover";
@@ -673,7 +674,8 @@ export async function evaluateInlineExpression(
           )
         : undefined;
 
-    const evaluator = new Evaluator(bundle.main, extras, {
+    const prepared = await prepareVaultQueryTables(plugin, { ...bundle, extras }, opts?.seed);
+    const evaluator = new Evaluator(prepared.main, prepared.extras, {
         // Thread seed + promptValues through when provided (used by
         // the public API's roll options). Both are first-class
         // EvaluatorOptions fields, so this is a clean pass-through:

@@ -19,6 +19,10 @@
 import { Notice, TFile, TFolder } from "obsidian";
 import { parseGeneratorFile } from "../engine/fileParser";
 import { Evaluator } from "../engine/evaluator";
+import { ResolvedBundle, dirname, resolveBundle } from "../resolver/fileResolver";
+import { prefetchUseGraph } from "../resolver/asyncPrefetcher";
+import { prepareVaultQueryTables } from "../views/queryTableSource";
+import { vaultFileSource } from "../views/vaultFileSource";
 import { isGeneratorPath } from "../generatorFormat";
 import {
     DeckCard,
@@ -222,6 +226,9 @@ export class DeckService {
                 const parsed = parseGeneratorFile(rdmSource);
                 const table = parsed.tables[0];
                 if (table) {
+                    if (table.query) {
+                        throw new Error("A folder deck's card table must contain static rows, not QueryTable results.");
+                    }
                     tableName = table.name;
                     if (table.flipChance !== undefined) {
                         rdmSettings.flip = table.flipChance;
@@ -481,7 +488,8 @@ export class DeckService {
         facing: Facing
     ): Promise<DrawResult> {
         const card = deck.cards[index];
-        const text = this.renderCardText(deck, card, facing);
+        const prepared = await this.prepareCardQueries(deck);
+        const text = this.renderCardText(deck, card, facing, prepared);
         return { deck, card, facing, ...(text !== null ? { text } : {}) };
     }
 
@@ -493,7 +501,8 @@ export class DeckService {
     renderCardText(
         deck: FolderDeck,
         card: DeckCard,
-        facing: Facing
+        facing: Facing,
+        prepared?: ResolvedBundle
     ): string | null {
         if (deck.rdmSource === undefined || deck.tableName === undefined) {
             return null;
@@ -502,8 +511,8 @@ export class DeckService {
             return null;
         }
         try {
-            const parsed = parseGeneratorFile(deck.rdmSource);
-            const evaluator = new Evaluator(parsed, [], {
+            const parsed = prepared?.main ?? parseGeneratorFile(deck.rdmSource);
+            const evaluator = new Evaluator(parsed, prepared?.extras ?? [], {
                 presetVars: { facing, turn: String(facingTurns(facing)) },
             });
             if (card.textKey !== undefined) {
@@ -517,6 +526,24 @@ export class DeckService {
                 "]"
             );
         }
+    }
+
+    private async prepareCardQueries(deck: FolderDeck): Promise<ResolvedBundle | undefined> {
+        if (!deck.rdmSource || !deck.rdmPath) return undefined;
+        const parsed = parseGeneratorFile(deck.rdmSource);
+        if (!parsed.tables.some((table) => table.query)) return undefined;
+        const prefetch = await prefetchUseGraph({
+            entryPath: deck.rdmPath,
+            entrySource: deck.rdmSource,
+            source: vaultFileSource(this.plugin.app.vault),
+            generatorRoot: this.plugin.settings.generatorRoot || undefined,
+        });
+        const bundle = resolveBundle(deck.rdmPath, deck.rdmSource, {
+            callerDir: dirname(deck.rdmPath),
+            source: prefetch.source,
+            generatorRoot: this.plugin.settings.generatorRoot || undefined,
+        });
+        return prepareVaultQueryTables(this.plugin, bundle);
     }
 
     // ── Persistence: folder decks ───────────────────────────────────
@@ -643,6 +670,11 @@ export class DeckService {
     }> {
         const tableStates = await this.loadTableStates();
         const folderDecks = await this.listDecks();
+        const preparedTexts = new Map<FolderDeck, ResolvedBundle>();
+        await Promise.all(folderDecks.map(async (deck) => {
+            const prepared = await this.prepareCardQueries(deck);
+            if (prepared) preparedTexts.set(deck, prepared);
+        }));
         const byName = new Map<string, FolderDeck>();
         for (const d of folderDecks) byName.set(cardSlug(d.name), d);
 
@@ -683,7 +715,8 @@ export class DeckService {
             return s;
         };
 
-        const formatCardInline = this.formatCardInline.bind(this);
+        const formatCardInline = (deck: FolderDeck, rec: DrawnRecord) =>
+            this.formatCardInline(deck, rec, preparedTexts.get(deck));
         const touchedDecks = new Set<FolderDeck>();
         let touchedTables = false;
 
@@ -745,14 +778,14 @@ export class DeckService {
      * facing suffix), image embed when the card has one, and the
      * rendered card text when it has any.
      */
-    private formatCardInline(deck: FolderDeck, rec: DrawnRecord): string {
+    private formatCardInline(deck: FolderDeck, rec: DrawnRecord, prepared?: ResolvedBundle): string {
         const card = deck.cards[rec.index];
         let out = card.name;
         out += facingLabel(rec.facing);
         if (card.imagePath !== undefined) {
             out = `![[${card.imagePath}]]\n` + out;
         }
-        const text = this.renderCardText(deck, card, rec.facing);
+        const text = this.renderCardText(deck, card, rec.facing, prepared);
         if (text !== null && text.trim() !== "") {
             out += ` — ${text}`;
         }

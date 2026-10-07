@@ -14,7 +14,8 @@ import * as fs from "fs";
 import { parseGeneratorFile } from "../src/engine/fileParser";
 import { Evaluator } from "../src/engine/evaluator";
 import { buildInlineBundle } from "../src/resolver/scope";
-import { inMemorySource } from "../src/resolver/fileResolver";
+import { inMemorySource, ResolvedBundle } from "../src/resolver/fileResolver";
+import { prepareQueryTables } from "../src/resolver/queryTables";
 import { TagRollFilter, matchesTagRollFilter } from "../src/resolver/mdContent";
 import { evalSourceOf } from "../src/views/lockingService";
 
@@ -62,16 +63,31 @@ function parseFakeVault(note: string): FakeNote[] {
 
 const [, , mode, ...rest] = process.argv;
 
-try {
+async function prepare(bundle: ResolvedBundle, source: string, seed?: number): Promise<ResolvedBundle> {
+    const vault = parseFakeVault(source);
+    return prepareQueryTables(bundle, {
+        seed,
+        source: {
+            read: async (path) => vault.find((note) => note.path === path)?.body ?? null,
+            exists: async (path) => vault.some((note) => note.path === path),
+        },
+        files: (filter) => vault.filter((note) =>
+            matchesTagRollFilter(note.tags, note.fm, filter, note.path)
+        ).map((note) => note.path).sort(),
+        frontmatter: (path) => vault.find((note) => note.path === path)?.fm,
+    });
+}
+
+async function main(): Promise<void> {
     if (mode === "gen" || mode === "src") {
         const src =
             mode === "gen" ? fs.readFileSync(rest[0], "utf8") : readStdin();
         const table = mode === "gen" ? rest[1] : rest[0];
         const seedArg = mode === "gen" ? rest[2] : rest[1];
         const file = parseGeneratorFile(src);
-        const ev = new Evaluator(file, [], {
-            seed: seedArg === undefined ? undefined : Number(seedArg),
-        });
+        const seed = seedArg === undefined ? undefined : Number(seedArg);
+        const bundle = await prepare({ main: file, extras: [], loadedPaths: [] }, src, seed);
+        const ev = new Evaluator(bundle.main, bundle.extras, { seed });
         process.stdout.write(
             table ? ev.runByName(table) : ev.run()
         );
@@ -105,15 +121,17 @@ try {
             tagFrontmatter: (p: string) =>
                 vault.find((n) => n.path === p)?.fm,
         });
-        const ev = new Evaluator(bundle.main, bundle.extras, {
-            seed: seedArg === undefined || seedArg === "" ? undefined : Number(seedArg),
-        });
+        const seed = seedArg === undefined || seedArg === "" ? undefined : Number(seedArg);
+        const prepared = await prepare(bundle, noteSource, seed);
+        const ev = new Evaluator(prepared.main, prepared.extras, { seed });
         process.stdout.write(ev.run());
     } else {
         process.stderr.write("modes: gen | src | inline\n");
         process.exit(2);
     }
-} catch (e) {
-    process.stdout.write("ERROR: " + (e as Error).message);
-    process.exit(1);
 }
+
+void main().catch((error: unknown) => {
+    process.stdout.write("ERROR: " + (error instanceof Error ? error.message : String(error)));
+    process.exit(1);
+});

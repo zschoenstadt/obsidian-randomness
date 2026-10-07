@@ -35,6 +35,40 @@ console.log(result.result); // -> "Mordred the Pale"
 
 All roll methods are `async` and return a `Promise<RollResult>`.
 
+### Query tables
+
+Query tables give tag rolls a name. Define one in a generator:
+
+```text
+QueryTable: Merchants=#npc|#merchant|link
+Default: a travelling stranger
+```
+
+Then roll it with the same methods you use for any table:
+
+```js
+const merchant = await api.rollUnscoped("Merchants");
+tR += merchant.result;
+```
+
+`roll()` and `rollExpression()` work too, with their usual scope
+rules. `tables()` and `tablesWithSources()` list the name without
+running the tag roll.
+
+Each roll checks the notes again. A seed repeats the result while
+the data stays the same. Empty matches return `Default:`, or an
+empty string. List properties stay comma-joined, and block rolls
+pick a note before a block — the same as inline tag rolls.
+
+**Query tables don't support `Deck: persistent`.** Use `[!...]`
+for non-repeating picks within one roll. Variables and `with`
+arguments don't change the filters at this time.
+
+If you use the engine directly rather than this API, call
+[`prepareQueryTables`](src/resolver/queryTables.ts) with your file
+and metadata sources before constructing an `Evaluator`. The API
+does this for you.
+
 ---
 
 ## Scoped vs. unscoped — which roll do I use?

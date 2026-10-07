@@ -5,6 +5,9 @@ All notable changes to the Randomness plugin.
 ## Unreleased
 
 ### Fixed
+- **Nested properties work in tag rolls.** `prop: {{parent.child}}`
+  reads the child value, and property filters follow the same path.
+  Literal dotted keys take precedence; matching is case-insensitive.
 - **Property names can start with a hyphen.** `prop:-value` and
   `prop:-` now work in tag rolls, including query tables.
 

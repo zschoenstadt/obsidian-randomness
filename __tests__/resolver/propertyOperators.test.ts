@@ -80,6 +80,24 @@ describe("list membership", () => {
 });
 
 describe("operator queries across inline and named tables", () => {
+    test("combined build supports comparisons and membership in nested properties", async () => {
+        const fm = { Stats: { "challenge-rating": "4", Types: ["undead", "fey"] } };
+        const expression = "#monster|stats.challenge-rating>=3|stats.challenge-rating<5|stats.types contains undead|prop:{{stats.challenge-rating}}";
+        const query = parseDirectTagCall(expression);
+        if (!query) throw new Error("Nested query failed to parse");
+        expect(matchesTagRollFilter(new Set(["monster"]), fm, query.filter)).toBe(true);
+        expect(matchesTagRollFilter(new Set(["monster"]), { stats: { "challenge-rating": 6, types: ["undead"] } }, query.filter))
+            .toBe(false);
+        const prepared = await prepareQueryTables({
+            main: parseGeneratorFile(`QueryTable: Q=${expression}`), extras: [], loadedPaths: [],
+        }, {
+            source: { read: async () => null, exists: async () => false },
+            files: (filter) => matchesTagRollFilter(new Set(["monster"]), fm, filter) ? ["A.md"] : [],
+            frontmatter: () => fm,
+        });
+        expect(new Evaluator(prepared.main, prepared.extras).run()).toBe("4");
+    });
+
     const metadata: Record<string, Record<string, unknown>> = {
         "A.md": { cr: 2, types: ["undead"] },
         "B.md": { cr: 4, types: ["undead"] },

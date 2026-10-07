@@ -9,6 +9,11 @@ All notable changes to the Randomness plugin.
   `prop:-` now work in tag rolls, including query tables.
 
 ### Added
+- **Pick tag rolls by a range or a list item.** `cr>=3|cr<=5`
+  finds CR 3 through 5; `types contains undead` finds a list with
+  an `undead` item. Comparisons accept numbers and numeric text.
+  `contains` matches whole list items, not substrings. Both work
+  inline, under `dice:`, and in query tables.
 - **Give a tag roll a table name.** Write
   `QueryTable: Merchants=#npc|#merchant|link`, then use
   `[@Merchants]` anywhere in your generator. Folders, properties,

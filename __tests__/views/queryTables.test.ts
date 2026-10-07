@@ -56,6 +56,19 @@ const QUERY = "QueryTable: People=#npc|prop:{{name}} (CR {{cr}})";
 const NPC = "---\ntags: [npc]\ncr: 3\n---\nA merchant.";
 
 describe("named queries across plugin surfaces", () => {
+    test("numeric and list filters work through vault metadata in inline and named rolls", async () => {
+        const expression = "#npc|cr>=3|cr<4|rumours contains two|prop:{{name}} (CR {{cr}})";
+        const { plugin } = fixture({
+            "queries.rdm": `QueryTable: Filtered=${expression}`,
+            "Note.md": "", "NPC.md": NPC,
+        });
+        expect(await evaluateInlineExpression(expression, "Note.md", plugin as never))
+            .toBe("NPC (CR 3)");
+        expect(await rollTable(plugin as never, "queries.rdm", "Filtered")).toBe("NPC (CR 3)");
+        await expect(evaluateInlineExpression("#npc|cr>3|link", "Note.md", plugin as never))
+            .rejects.toThrow("No notes found");
+    });
+
     test("inline reference inside prose and API scoped rolls", async () => {
         const { plugin } = fixture({
             "Note.md": `\`\`\`randomness\n${QUERY}\n\`\`\``,

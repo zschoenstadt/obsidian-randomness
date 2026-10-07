@@ -1,0 +1,118 @@
+import { Evaluator } from "../../src/engine/evaluator";
+import { parseGeneratorFile } from "../../src/engine/fileParser";
+import { translateDiceExpression } from "../../src/compat/diceCompat";
+import { inMemorySource } from "../../src/resolver/fileResolver";
+import { matchesTagRollFilter, parseDirectTagCall } from "../../src/resolver/mdContent";
+import { prepareQueryTables } from "../../src/resolver/queryTables";
+import { buildInlineBundle } from "../../src/resolver/scope";
+
+function matches(segment: string, metadata: Record<string, unknown>): boolean {
+    const query = parseDirectTagCall(`*|${segment}|link`);
+    if (!query) throw new Error(`Fixture did not parse: ${segment}`);
+    return matchesTagRollFilter(new Set(), metadata, query.filter);
+}
+
+describe("numeric property comparisons", () => {
+    test.each([
+        [">", 3, false], [">", 4, true], [">", 2, false],
+        [">=", 3, true], [">=", 2, false],
+        ["<", 3, false], ["<", 2, true], ["<", 4, false],
+        ["<=", 3, true], ["<=", 4, false],
+    ])("cr%s3 with %s matches %s", (operator, value, expected) => {
+        expect(matches(`cr${operator}3`, { cr: value })).toBe(expected);
+        expect(matches(` CR ${operator} 3 `, { cr: String(value) })).toBe(expected);
+    });
+
+    test("compare numbers, not lexicographic strings", () => {
+        expect(matches("cr>2", { cr: "10" })).toBe(true);
+        expect(matches("cr<-0.5", { cr: "-1.25" })).toBe(true);
+        expect(matches("cr>=1e2", { cr: 100 })).toBe(true);
+        expect(matches("cr<=.5", { cr: 0.5 })).toBe(true);
+    });
+
+    test.each([null, undefined, "", " ", "3 goblins", "0x10", true, {}, NaN, Infinity])(
+        "exclude nonnumeric property %j", (value) => {
+            expect(matches("cr>=0", { cr: value })).toBe(false);
+        }
+    );
+
+    test("missing values fail; any numeric list item or threshold can match", () => {
+        expect(matches("cr>0", {})).toBe(false);
+        expect(matches("cr>3", { cr: ["unknown", "4"] })).toBe(true);
+        expect(matches("cr>3,10", { cr: 4 })).toBe(true);
+        expect(matches("cr>3|cr<5", { cr: 4 })).toBe(true);
+        expect(matches("cr>3|cr<5", { cr: 6 })).toBe(false);
+    });
+
+    test.each(["cr>", "cr>=nope", "cr<=Infinity", "cr>3,nope", "folder>3", "types contains", "folder contains x"])(
+        "invalid operator input reports an error: %s", (segment) => {
+            expect(() => parseDirectTagCall(`*|${segment}|link`)).toThrow();
+        }
+    );
+});
+
+describe("list membership", () => {
+    test("case-insensitive whole-item match, not substrings or scalar text", () => {
+        expect(matches("types contains undead", { Types: ["Fey", "Undead"] })).toBe(true);
+        expect(matches("types CONTAINS undead", { types: ["undead warrior"] })).toBe(false);
+        expect(matches("types contains undead", { types: "undead" })).toBe(false);
+        expect(matches("types contains undead", { types: [] })).toBe(false);
+        expect(matches("types contains undead", {})).toBe(false);
+    });
+
+    test("OR values, numbers, wikilink names and aliases retain equality forms", () => {
+        expect(matches("types contains undead,fey", { types: ["fey"] })).toBe(true);
+        expect(matches("levels contains 3", { levels: [3] })).toBe(true);
+        expect(matches("worlds contains Eldara", { worlds: ["[[Worlds/Eldara|The Realm]]"] })).toBe(true);
+        expect(matches("worlds contains The Realm", { worlds: ["[[Worlds/Eldara|The Realm]]"] })).toBe(true);
+        expect(matches("types contains *", { types: ["fey"] })).toBe(false);
+        expect(matches("types contains *", { types: ["*"] })).toBe(true);
+        expect(matches("types contains a=b", { types: ["a=b"] })).toBe(true);
+    });
+
+    test("existing equality and existence remain unchanged", () => {
+        expect(matches("types=undead", { types: "undead" })).toBe(true);
+        expect(matches("types=*", { types: ["fey"] })).toBe(true);
+        expect(matches("title=contains undead", { title: "contains undead" })).toBe(true);
+        expect(parseDirectTagCall("*|challenge-rating>=3|link")?.filter.props)
+            .toEqual([{ key: "challenge-rating", values: ["3"], operator: ">=" }]);
+    });
+});
+
+describe("operator queries across inline and named tables", () => {
+    const metadata: Record<string, Record<string, unknown>> = {
+        "A.md": { cr: 2, types: ["undead"] },
+        "B.md": { cr: 4, types: ["undead"] },
+        "C.md": { cr: 6, types: ["fey"] },
+    };
+    const files = (filter: Parameters<typeof matchesTagRollFilter>[2]) =>
+        Object.keys(metadata).filter((path) =>
+            matchesTagRollFilter(new Set(["monster"]), metadata[path], filter, path)
+        );
+
+    test("same matches under rdm, dice compatibility, and QueryTable", async () => {
+        const source = "#monster|cr>3|cr<=5|types contains undead|prop:{{name}} CR {{cr}}";
+        const query = parseDirectTagCall(source);
+        expect(query?.label).toBe("#monster|cr>3|cr<=5|types contains undead");
+        expect(translateDiceExpression(source).expr).toBe(source);
+        const inline = buildInlineBundle(source, {
+            notePath: "Note.md", noteSource: "", source: inMemorySource({}),
+            tagFiles: files, tagFrontmatter: (path) => metadata[path],
+        });
+        expect(new Evaluator(inline.main, inline.extras).run()).toBe("B CR 4");
+        const prepared = await prepareQueryTables({
+            main: parseGeneratorFile(`QueryTable: Q=${source}`), extras: [], loadedPaths: [],
+        }, {
+            source: { read: async () => null, exists: async () => false },
+            files, frontmatter: (path) => metadata[path],
+        });
+        expect(prepared.main.tables[0].items).toHaveLength(1);
+        expect(new Evaluator(prepared.main, prepared.extras).run()).toBe("B CR 4");
+    });
+
+    test("prop template content is not parsed as a filter", () => {
+        const query = parseDirectTagCall("#monster|prop:{{name}} contains undead > 3");
+        expect(query?.filter.props).toEqual([]);
+        expect(query?.template).toBe("{{name}} contains undead > 3");
+    });
+});

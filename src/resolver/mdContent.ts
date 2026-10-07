@@ -938,10 +938,10 @@ export function extractNoteBlocks(md: string): string[] {
 export interface TagPropFilter {
     /** Property name (matched case-insensitively). */
     key: string;
-    operator?: "=" | ">" | ">=" | "<" | "<=" | "contains";
+    operator?: "=" | ">" | ">=" | "<" | "<=" | "has";
     /**
      * Accepted values (OR). With equality, `"*"` means the property
-     * exists with a non-empty value; with contains it is literal.
+     * exists with a non-empty value; with has it is literal.
      */
     values: string[];
 }
@@ -1241,13 +1241,13 @@ export function parseDirectTagCall(expr: string): DirectTagCall | null {
             filter.tagGroups.push(g);
             continue;
         }
-        const membership = seg.match(/^([^<>=]+?)\s+contains(?:\s+(.*))?$/i);
+        const membership = seg.match(/^([^<>=]+?)\s+has(?:\s+(.*))?$/i);
         const comparison = membership === null
             ? seg.match(/^([^<>=]+?)\s*(>=|<=|>|<|=)\s*(.*)$/)
             : null;
         if (comparison || membership) {
             const key = (comparison?.[1] ?? membership?.[1] ?? "").trim();
-            const operator = comparison?.[2] ?? "contains";
+            const operator = comparison?.[2] ?? "has";
             const values = (comparison?.[3] ?? membership?.[2] ?? "")
                 .split(",")
                 .map((v) => v.trim())
@@ -1256,7 +1256,7 @@ export function parseDirectTagCall(expr: string): DirectTagCall | null {
                 if (operator === "=") return null;
                 throw new Error(`Invalid property filter '${seg}': expected a value.`);
             }
-            if (operator !== "=" && operator !== "contains" &&
+            if (operator !== "=" && operator !== "has" &&
                 values.some((value) => numericPropertyValue(value) === undefined)) {
                 throw new Error(`Invalid property filter '${seg}': comparisons require finite numbers.`);
             }
@@ -1281,7 +1281,7 @@ export function parseDirectTagCall(expr: string): DirectTagCall | null {
                     case ">=":
                     case "<":
                     case "<=":
-                    case "contains":
+                    case "has":
                         filter.props.push({ key, values, operator });
                         break;
                 }
@@ -1339,7 +1339,7 @@ export function describeTagFilter(f: TagRollFilter): string {
         parts.push(`folder=${f.folders.join(",")}`);
     }
     for (const p of f.props) {
-        const operator = p.operator === "contains" ? " contains " : p.operator ?? "=";
+        const operator = p.operator === "has" ? " has " : p.operator ?? "=";
         parts.push(`${p.key}${operator}${p.values.join(",")}`);
     }
     return parts.length > 0 ? parts.join("|") : "*";
@@ -1387,9 +1387,9 @@ export function matchesTagRollFilter(
     for (const p of filter.props) {
         const raw = frontmatterProperty(fm, p.key);
         const operator = p.operator ?? "=";
-        if (operator === "contains" && !Array.isArray(raw)) return false;
+        if (operator === "has" && !Array.isArray(raw)) return false;
         const list = Array.isArray(raw) ? raw : raw == null ? [] : [raw];
-        if (operator !== "=" && operator !== "contains") {
+        if (operator !== "=" && operator !== "has") {
             const ok = list.some((value) => {
                 const number = numericPropertyValue(value);
                 if (number === undefined) return false;

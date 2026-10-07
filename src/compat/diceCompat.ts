@@ -386,7 +386,7 @@ function translateTagRoller(s: string): string {
             unique = true;
             continue;
         }
-        if (suf.startsWith("#") || /[=<>]|\s+contains(?:\s|$)/i.test(suf)) {
+        if (suf.startsWith("#") || /[=<>]|\s+has(?:\s|$)/i.test(suf)) {
             filters.push(suf);
             continue;
         }

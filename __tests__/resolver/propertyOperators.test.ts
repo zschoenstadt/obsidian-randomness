@@ -44,7 +44,7 @@ describe("numeric property comparisons", () => {
         expect(matches("cr>3|cr<5", { cr: 6 })).toBe(false);
     });
 
-    test.each(["cr>", "cr>=nope", "cr<=Infinity", "cr>3,nope", "folder>3", "types contains", "folder contains x"])(
+    test.each(["cr>", "cr>=nope", "cr<=Infinity", "cr>3,nope", "folder>3", "types has", "folder has x"])(
         "invalid operator input reports an error: %s", (segment) => {
             expect(() => parseDirectTagCall(`*|${segment}|link`)).toThrow();
         }
@@ -53,27 +53,28 @@ describe("numeric property comparisons", () => {
 
 describe("list membership", () => {
     test("case-insensitive whole-item match, not substrings or scalar text", () => {
-        expect(matches("types contains undead", { Types: ["Fey", "Undead"] })).toBe(true);
-        expect(matches("types CONTAINS undead", { types: ["undead warrior"] })).toBe(false);
-        expect(matches("types contains undead", { types: "undead" })).toBe(false);
-        expect(matches("types contains undead", { types: [] })).toBe(false);
-        expect(matches("types contains undead", {})).toBe(false);
+        expect(matches("types has undead", { Types: ["Fey", "Undead"] })).toBe(true);
+        expect(matches("types HAS undead", { types: ["undead warrior"] })).toBe(false);
+        expect(matches("types HAS undead", { types: ["Undead"] })).toBe(true);
+        expect(matches("types has undead", { types: "undead" })).toBe(false);
+        expect(matches("types has undead", { types: [] })).toBe(false);
+        expect(matches("types has undead", {})).toBe(false);
     });
 
     test("OR values, numbers, wikilink names and aliases retain equality forms", () => {
-        expect(matches("types contains undead,fey", { types: ["fey"] })).toBe(true);
-        expect(matches("levels contains 3", { levels: [3] })).toBe(true);
-        expect(matches("worlds contains Eldara", { worlds: ["[[Worlds/Eldara|The Realm]]"] })).toBe(true);
-        expect(matches("worlds contains The Realm", { worlds: ["[[Worlds/Eldara|The Realm]]"] })).toBe(true);
-        expect(matches("types contains *", { types: ["fey"] })).toBe(false);
-        expect(matches("types contains *", { types: ["*"] })).toBe(true);
-        expect(matches("types contains a=b", { types: ["a=b"] })).toBe(true);
+        expect(matches("types has undead,fey", { types: ["fey"] })).toBe(true);
+        expect(matches("levels has 3", { levels: [3] })).toBe(true);
+        expect(matches("worlds has Eldara", { worlds: ["[[Worlds/Eldara|The Realm]]"] })).toBe(true);
+        expect(matches("worlds has The Realm", { worlds: ["[[Worlds/Eldara|The Realm]]"] })).toBe(true);
+        expect(matches("types has *", { types: ["fey"] })).toBe(false);
+        expect(matches("types has *", { types: ["*"] })).toBe(true);
+        expect(matches("types has a=b", { types: ["a=b"] })).toBe(true);
     });
 
     test("existing equality and existence remain unchanged", () => {
         expect(matches("types=undead", { types: "undead" })).toBe(true);
         expect(matches("types=*", { types: ["fey"] })).toBe(true);
-        expect(matches("title=contains undead", { title: "contains undead" })).toBe(true);
+        expect(matches("title=has undead", { title: "has undead" })).toBe(true);
         expect(parseDirectTagCall("*|challenge-rating>=3|link")?.filter.props)
             .toEqual([{ key: "challenge-rating", values: ["3"], operator: ">=" }]);
     });
@@ -82,7 +83,7 @@ describe("list membership", () => {
 describe("operator queries across inline and named tables", () => {
     test("combined build supports comparisons and membership in nested properties", async () => {
         const fm = { Stats: { "challenge-rating": "4", Types: ["undead", "fey"] } };
-        const expression = "#monster|stats.challenge-rating>=3|stats.challenge-rating<5|stats.types contains undead|prop:{{stats.challenge-rating}}";
+        const expression = "#monster|stats.challenge-rating>=3|stats.challenge-rating<5|stats.types has undead|prop:{{stats.challenge-rating}}";
         const query = parseDirectTagCall(expression);
         if (!query) throw new Error("Nested query failed to parse");
         expect(matchesTagRollFilter(new Set(["monster"]), fm, query.filter)).toBe(true);
@@ -109,9 +110,9 @@ describe("operator queries across inline and named tables", () => {
         );
 
     test("same matches under rdm, dice compatibility, and QueryTable", async () => {
-        const source = "#monster|cr>3|cr<=5|types contains undead|prop:{{name}} CR {{cr}}";
+        const source = "#monster|cr>3|cr<=5|types has undead|prop:{{name}} CR {{cr}}";
         const query = parseDirectTagCall(source);
-        expect(query?.label).toBe("#monster|cr>3|cr<=5|types contains undead");
+        expect(query?.label).toBe("#monster|cr>3|cr<=5|types has undead");
         expect(translateDiceExpression(source).expr).toBe(source);
         const inline = buildInlineBundle(source, {
             notePath: "Note.md", noteSource: "", source: inMemorySource({}),
@@ -129,8 +130,8 @@ describe("operator queries across inline and named tables", () => {
     });
 
     test("prop template content is not parsed as a filter", () => {
-        const query = parseDirectTagCall("#monster|prop:{{name}} contains undead > 3");
+        const query = parseDirectTagCall("#monster|prop:{{name}} has undead > 3");
         expect(query?.filter.props).toEqual([]);
-        expect(query?.template).toBe("{{name}} contains undead > 3");
+        expect(query?.template).toBe("{{name}} has undead > 3");
     });
 });

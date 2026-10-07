@@ -77,14 +77,14 @@ Numbers can be compared too:
 it. Numeric text works too, but missing or nonnumeric properties
 don't match.
 
-For lists, `contains` asks for a whole item:
+For lists, `has` asks for a whole item:
 
 ```text
-`rdm:#monster|types contains undead|link`
+`rdm:#monster|types has undead|link`
 ```
 
 That finds `types: [fey, undead]`, not `types: [undead warrior]`.
-Capital letters don't matter. `contains` is for list properties,
+Capital letters don't matter. `has` is for list properties,
 not a search inside a sentence.
 
 ## More than one at a time

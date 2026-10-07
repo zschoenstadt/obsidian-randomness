@@ -57,7 +57,7 @@ const NPC = "---\ntags: [npc]\ncr: 3\n---\nA merchant.";
 
 describe("named queries across plugin surfaces", () => {
     test("numeric and list filters work through vault metadata in inline and named rolls", async () => {
-        const expression = "#npc|cr>=3|cr<4|rumours contains two|prop:{{name}} (CR {{cr}})";
+        const expression = "#npc|cr>=3|cr<4|rumours has two|prop:{{name}} (CR {{cr}})";
         const { plugin } = fixture({
             "queries.rdm": `QueryTable: Filtered=${expression}`,
             "Note.md": "", "NPC.md": NPC,

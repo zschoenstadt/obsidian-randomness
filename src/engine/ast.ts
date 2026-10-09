@@ -78,6 +78,14 @@ export type TableItem = {
     rawContent: string;
 };
 
+export function tableRegistry(files: readonly GeneratorFile[]): Map<string, TableDecl> {
+    const tables = new Map<string, TableDecl>();
+    for (const file of files) {
+        for (const table of file.tables) tables.set(table.name.toLowerCase(), table);
+    }
+    return tables;
+}
+
 // ───────────────────── Content nodes ─────────────────────
 // Once a TableItem's rawContent is parsed into nodes, it becomes a Node[].
 // Nodes are what the evaluator walks to produce output.

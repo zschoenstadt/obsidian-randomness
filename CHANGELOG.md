@@ -5,6 +5,13 @@ All notable changes to the Randomness plugin.
 ## Unreleased
 
 ### Fixed
+- **Query tables load only when used.** Untaken branches and
+  unselected rows no longer run their queries. Dynamic table names
+  load the chosen table, and block queries read only selected notes.
+  Rows and reads are reused for one roll, then cleared on completion
+  or error. Folder-deck queries wait until card text actually uses them.
+  Skipping unused block queries may change older multi-query seeded
+  results, while repeated rolls remain deterministic.
 - **Property names can start with a hyphen.** `prop:-value` and
   `prop:-` now work in tag rolls, including query tables.
 

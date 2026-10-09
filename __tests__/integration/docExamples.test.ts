@@ -27,7 +27,7 @@ import { parseGeneratorFile } from "../../src/engine/fileParser";
 import { Evaluator } from "../../src/engine/evaluator";
 import { inMemorySource } from "../../src/resolver/fileResolver";
 import { buildInlineBundle } from "../../src/resolver/scope";
-import { prepareQueryTables } from "../../src/resolver/queryTables";
+import { createQueryTableSource } from "../../src/resolver/queryTables";
 import { matchesTagRollFilter } from "../../src/resolver/mdContent";
 
 const DOCS = path.join(__dirname, "..", "..", "docs");
@@ -130,9 +130,8 @@ describe("documentation: every generator example parses and rolls", () => {
             // is random by design and is not asserted.
             const candidate = "Bestiary/Example.md";
             const metadata = { cr: 3, universe: "Eldara", rumours: ["one", "two"] };
-            const prepared = await prepareQueryTables({
-                main: file, extras: [], loadedPaths: [],
-            }, {
+            const bundle = { main: file, extras: [], loadedPaths: [] };
+            const source = createQueryTableSource(bundle, {
                 seed: 1,
                 source: {
                     read: async (path) => path === candidate ? "A documentation example block." : null,
@@ -143,7 +142,7 @@ describe("documentation: every generator example parses and rolls", () => {
                 ) ? [candidate] : [],
                 frontmatter: () => metadata,
             });
-            new Evaluator(prepared.main, prepared.extras, { seed: 1 }).run();
+            await new Evaluator(file, [], { seed: 1, tableSource: source }).runAsync();
         } catch (e) {
             thrown = e as Error;
         }

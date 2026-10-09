@@ -64,10 +64,24 @@ pick a note before a block — the same as inline tag rolls.
 for non-repeating picks within one roll. Variables and `with`
 arguments don't change the filters at this time.
 
-If you use the engine directly rather than this API, call
-[`prepareQueryTables`](src/resolver/queryTables.ts) with your file
-and metadata sources before constructing an `Evaluator`. The API
-does this for you.
+Queries load only when execution reaches a call or `count()`.
+Untaken branches and unselected rows do not load their queries,
+and dynamic names load only the chosen table. Rows and note reads
+are reused within the roll and discarded on completion or error.
+Skipping unused block queries can change older multi-query seeded
+results; repeated rolls with the same seed and data stay deterministic.
+
+Direct engine consumers can supply a
+[`createQueryTableSource`](src/resolver/queryTables.ts) as
+`EvaluatorOptions.tableSource`, then use `runAsync()`,
+`runByNameAsync()`, `runByKeyAsync()`, or `evalRawTextAsync()`.
+The source takes the file and metadata callbacks; an optional
+`resolveTableName` callback supports tables discovered at runtime.
+The public API supplies these automatically.
+
+The existing synchronous methods still work for ordinary tables
+and already materialized rows. Query declarations without a source
+raise a clear error when accessed.
 
 ---
 

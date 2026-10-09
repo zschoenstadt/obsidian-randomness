@@ -1,10 +1,10 @@
 import { parseGeneratorFile } from "../../src/engine/fileParser";
-import { Evaluator } from "../../src/engine/evaluator";
+import { Evaluator, EvaluatorOptions } from "../../src/engine/evaluator";
 import { RNG } from "../../src/engine/rng";
 import { inMemorySource, parseFileSource, resolveBundle } from "../../src/resolver/fileResolver";
 import { parseDirectTagCall, sampleTagFiles, TagRollFilter, TAG_FILE_CAP } from "../../src/resolver/mdContent";
 import { nativeQueryItems, parseQueryTableSource } from "../../src/resolver/nativeQuery";
-import { prepareQueryTables, QueryTableOptions } from "../../src/resolver/queryTables";
+import { createQueryTableSource, QueryTableOptions } from "../../src/resolver/queryTables";
 import { buildInlineBundle } from "../../src/resolver/scope";
 
 function harness(
@@ -13,19 +13,25 @@ function harness(
     metadata: Record<string, Record<string, unknown>> = {}
 ) {
     const read = jest.fn(async (path: string) => files[path] ?? null);
+    const lookup = jest.fn((_filter: TagRollFilter) => paths);
     const options: QueryTableOptions = {
         source: { read, exists: async (path) => path in files },
-        files: jest.fn((_filter: TagRollFilter) => paths),
+        files: lookup,
         frontmatter: (path) => metadata[path],
         seed: 123,
     };
-    const prepare = (source: string, overrides: Partial<QueryTableOptions> = {}) =>
-        prepareQueryTables({
-            main: parseGeneratorFile(source),
-            extras: [],
-            loadedPaths: ["test.rdm"],
-        }, { ...options, ...overrides });
-    return { options, read, prepare };
+    const evaluator = (
+        source: string,
+        overrides: Partial<QueryTableOptions> = {},
+        evaluation: EvaluatorOptions = {}
+    ) => {
+        const bundle = { main: parseGeneratorFile(source), extras: [], loadedPaths: ["test.rdm"] };
+        return new Evaluator(bundle.main, [], {
+            seed: 123, ...evaluation,
+            tableSource: createQueryTableSource(bundle, { ...options, ...overrides }),
+        });
+    };
+    return { options, read, lookup, evaluator };
 }
 
 describe("QueryTable declarations", () => {
@@ -51,7 +57,7 @@ describe("QueryTable declarations", () => {
         expect(() => parseGeneratorFile(source)).toThrow(message);
     });
 
-    test("accept ordinary metadata and preserve a trailing ampersand on the declaration", () => {
+    test("accept ordinary metadata and retain a trailing ampersand", () => {
         const file = parseGeneratorFile(
             "QueryTable: N=#npc|prop:{{name}} &\nHidden: yes\nDefault: nobody\n" +
             "Deck: session\nType: weighted\nSet: x=1\nFlip: 50%\nTurn: half\nShuffle: Other\nEndTable:"
@@ -71,228 +77,249 @@ describe("QueryTable declarations", () => {
         expect(bundle.extras[0].tables[0].name).toBe("People");
     });
 
-    test.each(["nonsense", "#npc|folder={$place}|link"])(
-        "reject unsupported declaration source %s", (source) => {
-            expect(() => parseQueryTableSource(source)).toThrow();
-        }
-    );
+    test.each(["nonsense", "#npc|folder={$place}|link"])("reject malformed source %s", (source) => {
+        expect(() => parseQueryTableSource(source)).toThrow();
+    });
 
-    test("retain parsed inline controls without rejecting them", () => {
+    test("retain inline controls and template-owned text", () => {
         expect(parseQueryTableSource("3#npc|unique|sep:;|link")).toMatchObject({
             reps: "3", unique: true, sep: ";", mode: "link",
         });
-    });
-
-    test("selection-looking segments after prop remain literal template text", () => {
         expect(parseQueryTableSource("#npc|prop:{{name}}|unique|sep:;").template)
             .toBe("{{name}}|unique|sep:;");
+        expect(parseGeneratorFile("QueryTable: Q=#npc|prop:{{name}} https://example.com/a=b|literal")
+            .tables[0].query?.source).toBe("#npc|prop:{{name}} https://example.com/a=b|literal");
     });
 
-    test("query source preserves URL slashes and pipes in templates", () => {
-        const file = parseGeneratorFile("QueryTable: Q=#npc|prop:{{name}} https://example.com/a=b|literal");
-        expect(file.tables[0].query?.source).toBe("#npc|prop:{{name}} https://example.com/a=b|literal");
-    });
-
-    test("unprepared declarations cannot silently evaluate as empty", () => {
-        expect(() => new Evaluator(parseGeneratorFile("QueryTable: N=#npc|link")))
+    test("a synchronous evaluation still requires prepared query rows", () => {
+        expect(() => new Evaluator(parseGeneratorFile("QueryTable: N=#npc|link")).run())
             .toThrow("must be prepared");
     });
 });
 
-describe("QueryTable preparation", () => {
-    test.each(["link", "linkpath", "prop:{{name}}", "block"])(
-        "inline controls do not change %s table rows or seeded selection", async (mode) => {
-            const h = harness({ "A.md": "First", "B.md": "Second", "C.md": "Third" });
-            const plain = await h.prepare(`Table: Main\n[@Q]\nQueryTable: Q=#npc|${mode}`);
-            for (const controls of [
-                `3#npc|${mode}`,
-                `0#npc|${mode}`,
-                `{1d4}#npc|${mode}`,
-                `#npc|unique|${mode}`,
-                `#npc|sep:;|${mode}`,
-                `3#npc|unique|sep:;|${mode}`,
-            ]) {
-                const decorated = await h.prepare(`Table: Main\n[@Q]\nQueryTable: Q=${controls}`);
-                expect(decorated.main.tables[1].items).toEqual(plain.main.tables[1].items);
-                expect(decorated.main.tables[1].items).toHaveLength(3);
-                for (const seed of [1, 7, 123]) {
-                    expect(new Evaluator(decorated.main, decorated.extras, { seed }).run())
-                        .toBe(new Evaluator(plain.main, plain.extras, { seed }).run());
-                }
-            }
-        }
-    );
+describe("lazy query evaluation", () => {
+    test("500 notes and 20 unused queries cause no metadata scans or candidate reads", async () => {
+        const notes = Object.fromEntries(Array.from({ length: 500 }, (_, n) => [`N${n}.md`, "A block."]));
+        const h = harness(notes);
+        const source = "Table: Main\nplain result\n" + Array.from({ length: 20 }, (_, n) =>
+            `QueryTable: Unused${n}=#tag${n}${n % 2 ? "|link" : ""}`
+        ).join("\n");
+        expect(await h.evaluator(source).runAsync()).toBe("plain result");
+        expect(h.lookup).not.toHaveBeenCalled();
+        expect(h.read).not.toHaveBeenCalled();
+    });
 
-    test.each(["-", "-value", "challenge-rating"])("render YAML property %s", async (key) => {
-        const h = harness({}, ["A.md"], { "A.md": { [key]: "matched value" } });
-        for (const prop of [key, `{{${key}}}`]) {
-            const prepared = await h.prepare(`QueryTable: Q=#npc|prop:${prop}`);
-            expect(new Evaluator(prepared.main, prepared.extras).run()).toBe("matched value");
+    test("untaken branches, unselected rows, defaults and lazy definitions do not run queries", async () => {
+        const h = harness({}, ["A.md"]);
+        const source =
+            "Define: unused=[@Unused]\nTable: Main\n" +
+            "[when]1[do]plain[else][@Unused][end]\n" +
+            "Default: [@Unused]\nTable: Rows\nplain row\n[@Unused]\nQueryTable: Unused=invalid";
+        const evaluator = h.evaluator(source);
+        expect(await evaluator.runAsync()).toBe("plain");
+        expect(await evaluator.evalRawTextAsync("[#1 Rows]")).toBe("plain row");
+        expect(h.lookup).not.toHaveBeenCalled();
+    });
+
+    test("dynamic names load exactly the table chosen at runtime", async () => {
+        const h = harness({}, ["A.md"]);
+        const evaluator = h.evaluator(
+            "Table: Main\n[@{$which}]\nQueryTable: Wanted=#npc|link\nQueryTable: Other=invalid",
+            {}, { presetVars: { which: "Wanted" } }
+        );
+        expect(await evaluator.runAsync()).toBe("[[A|A]]");
+        expect(h.lookup).toHaveBeenCalledTimes(1);
+        expect(h.lookup).toHaveBeenCalledWith(expect.objectContaining({ tagGroups: [["npc"]] }));
+    });
+
+    test("a named roll does not load the defining file's main query", async () => {
+        const h = harness({}, ["A.md"]);
+        expect(await h.evaluator(
+            "QueryTable: Main=invalid\nTable: Named\n[@Q]\nQueryTable: Q=#npc|link"
+        ).runByNameAsync("Named")).toBe("[[A|A]]");
+        expect(h.lookup).toHaveBeenCalledTimes(1);
+    });
+
+    test.each(["link", "linkpath", "prop:{{name}}"])("inline controls leave %s rows unchanged", async (mode) => {
+        const h = harness({}, ["A.md", "B.md", "C.md"]);
+        for (const controls of ["", "3", "0", "{1d4}"]) {
+            expect(await h.evaluator(`QueryTable: Q=${controls}#npc|unique|sep:;|${mode}`).evalRawTextAsync("{count(Q)}"))
+                .toBe("3");
         }
+        expect(h.read).not.toHaveBeenCalled();
     });
 
     test.each(["#npc|link", "#npc|linkpath", "#npc|prop:rumours", "#npc|prop:{{name}} ({{cr}})"])(
-        "preserve inline output and seeded picks for %s", async (query) => {
+        "preserve inline row selection for %s", async (query) => {
             const paths = ["A.md", "B.md", "C.md"];
-            const fm = Object.fromEntries(paths.map((path) => [
-                path, { cr: 3, rumours: ["First rumour", "Second rumour"] },
-            ]));
+            const fm = Object.fromEntries(paths.map((path) => [path, { cr: 3, rumours: ["one", "two"] }]));
             const h = harness({}, paths, fm);
-            const prepared = await h.prepare(`Table: Main\n[@Q]\nQueryTable: Q=${query}`);
             const inline = buildInlineBundle(query, {
                 notePath: "note.md", noteSource: "", source: inMemorySource({}),
-                tagFiles: h.options.files, tagFrontmatter: h.options.frontmatter,
+                tagFiles: h.lookup, tagFrontmatter: h.options.frontmatter,
             });
-            expect(prepared.main.tables[1].items).toEqual(inline.main.tables[1].items);
             for (const seed of [1, 7, 123, 999]) {
-                expect(new Evaluator(prepared.main, prepared.extras, { seed }).run())
+                expect(await h.evaluator(`Table: Main\n[@Q]\nQueryTable: Q=${query}`, { seed }, { seed }).runAsync())
                     .toBe(new Evaluator(inline.main, inline.extras, { seed }).run());
             }
             expect(h.read).not.toHaveBeenCalled();
         }
     );
 
-    test("list properties remain together and interpolated data is not executable syntax", async () => {
-        const h = harness({}, ["A.md"], { "A.md": { rumours: ["[@Missing]", "{1d6}"] } });
-        const prepared = await h.prepare("QueryTable: Q=#npc|prop:rumours");
-        expect(new Evaluator(prepared.main, prepared.extras).run()).toBe("[@Missing], {1d6}");
+    test("list values and hyphenated properties remain literal data", async () => {
+        for (const key of ["-", "-value", "challenge-rating"]) {
+            const h = harness({}, ["A.md"], { "A.md": { [key]: ["[@Missing]", "{1d6}"] } });
+            expect(await h.evaluator(`QueryTable: Q=#npc|prop:{{${key}}}`).runAsync()).toBe("[@Missing], {1d6}");
+        }
     });
 
-    test("empty query uses ordinary empty/default behavior", async () => {
-        const h = harness({}, []);
-        const empty = await h.prepare("QueryTable: Q=#npc|link");
-        expect(new Evaluator(empty.main).run()).toBe("");
-        const fallback = await h.prepare("QueryTable: Q=#npc|link\nDefault: nobody");
-        expect(new Evaluator(fallback.main).run()).toBe("nobody");
-    });
-
-    test("support indexed picks, assignments, repetitions and session decks", async () => {
+    test("empty results, defaults, indexed picks and session draws retain table behavior", async () => {
+        const empty = harness({}, []);
+        expect(await empty.evaluator("QueryTable: Q=#npc|link").runAsync()).toBe("");
+        expect(await empty.evaluator("QueryTable: Q=#npc|link\nDefault: nobody").runAsync()).toBe("nobody");
         const h = harness({}, ["A.md", "B.md", "C.md"]);
-        const prepared = await h.prepare(
-            "Table: Main\n[#2 Q] / [@name==Q]{$name} / [!4 Q >> implode]\nQueryTable: Q=#npc|link"
-        );
-        const result = new Evaluator(prepared.main, prepared.extras, { seed: 7 }).run();
-        expect(result).toMatch(/^\[\[B\|B\]\] \/ \[\[[ABC]\|[ABC]\]\] \/ /);
-        const draws = result.split(" / ")[2].match(/\[\[[ABC]\|[ABC]\]\]/g);
+        expect(await h.evaluator("QueryTable: Q=#npc|link").evalRawTextAsync("[#2 Q]")).toBe("[[B|B]]");
+        const result = await h.evaluator("QueryTable: Q=#npc|link").evalRawTextAsync("[!4 Q >> implode]");
+        const draws = result.match(/\[\[[ABC]\|[ABC]\]\]/g);
         expect(draws).toHaveLength(3);
         expect(new Set(draws).size).toBe(3);
     });
 
-    test("do not flatten blocks, and preserve inline seeded block selection", async () => {
+    test("query rows are reused within a scope and discarded on completion", async () => {
+        const fm = { "A.md": { value: "old" } };
+        const h = harness({}, ["A.md"], fm);
+        const evaluator = h.evaluator("QueryTable: Q=#npc|prop:value");
+        expect(await evaluator.evalRawTextAsync("[@Q] [@Q] {count(Q)}")).toBe("old old 1");
+        expect(h.lookup).toHaveBeenCalledTimes(1);
+        fm["A.md"].value = "new";
+        expect(await evaluator.evalRawTextAsync("[@Q]")).toBe("new");
+        expect(h.lookup).toHaveBeenCalledTimes(2);
+    });
+
+    test("session query draws reset between async scopes", async () => {
+        const h = harness({}, ["A.md"]);
+        const evaluator = h.evaluator("QueryTable: Q=#npc|link");
+        expect(await evaluator.evalRawTextAsync("[!Q] / [!Q]")).toBe("[[A|A]] / ");
+        expect(await evaluator.evalRawTextAsync("[!Q]")).toBe("[[A|A]]");
+        expect(h.lookup).toHaveBeenCalledTimes(2);
+    });
+
+    test("loading leaves the original parsed declarations unchanged", async () => {
+        const h = harness({}, ["A.md"]);
+        const main = parseGeneratorFile("QueryTable: Q=#npc|link");
+        const bundle = { main, extras: [], loadedPaths: [] };
+        expect(await new Evaluator(main, [], { tableSource: createQueryTableSource(bundle, h.options) }).runAsync())
+            .toBe("[[A|A]]");
+        expect(main.tables[0].query).toEqual({ source: "#npc|link", line: 1 });
+        expect(main.tables[0].items).toEqual([]);
+        expect(bundle.extras).toEqual([]);
+        expect(bundle.loadedPaths).toEqual([]);
+    });
+
+    test("block mode chooses a note first and reads only that selected note", async () => {
         const files = { "A.md": "Only block", "B.md": "First\n\nSecond\n\nThird" };
         const h = harness(files);
-        const prepared = await h.prepare("Table: Main\n[@Q]\nQueryTable: Q=#rumour");
-        expect(prepared.main.tables[1].items).toHaveLength(2);
-        const helpers = prepared.extras.flatMap((file) => file.tables)
-            .filter((table) => table.name.startsWith("__queryblock:"));
-        expect(helpers.map((table) => table.items.length)).toEqual([1, 3]);
         const inline = buildInlineBundle("#rumour", {
-            notePath: "note.md", noteSource: "", source: inMemorySource(files),
-            tagFiles: h.options.files,
+            notePath: "note.md", noteSource: "", source: inMemorySource(files), tagFiles: h.lookup,
         });
         for (const seed of [1, 7, 123, 999]) {
-            expect(new Evaluator(prepared.main, prepared.extras, { seed }).run())
+            h.read.mockClear();
+            expect(await h.evaluator("Table: Main\n[@Q]\nQueryTable: Q=#rumour", { seed }, { seed }).runAsync())
                 .toBe(new Evaluator(inline.main, inline.extras, { seed }).run());
+            expect(h.read).toHaveBeenCalledTimes(1);
         }
-        expect(h.read.mock.calls.filter(([path]) => path === "A.md")).toHaveLength(1);
     });
 
-    test("private block helpers distinguish identical basenames", async () => {
-        const h = harness({ "One/Same.md": "One", "Two/Same.md": "Two" });
-        const prepared = await h.prepare(
-            "Table: Main\n[#1 Q] / [#2 Q]\nQueryTable: Q=#rumour"
-        );
-        expect(new Evaluator(prepared.main, prepared.extras).run()).toBe("One / Two");
+    test("sample exactly 50 candidates without reading all 50 bodies", async () => {
+        const paths = Array.from({ length: 100 }, (_, n) => `N${n}.md`).sort();
+        const notes = Object.fromEntries(paths.map((path) => [path, `Block ${path}`]));
+        const h = harness(notes, paths);
+        const result = await h.evaluator("QueryTable: Q=#rumour").runAsync();
+        expect(sampleTagFiles(paths, TAG_FILE_CAP, new RNG(123))).toContain(h.read.mock.calls[0][0]);
+        expect(h.read).toHaveBeenCalledTimes(1);
+        expect(result).toMatch(/^Block N\d+\.md$/);
     });
 
-    test("cap block candidates at exactly 50, memoize the sample, and preserve inputs", async () => {
-        const files = Object.fromEntries(Array.from({ length: 100 }, (_, n) => [
-            `Note${String(n).padStart(3, "0")}.md`, `Block ${n}`,
-        ]));
-        const h = harness(files);
-        const main = parseGeneratorFile("QueryTable: A=#rumour\nQueryTable: B=#rumour");
-        const input = { main, extras: [], loadedPaths: [] };
-        const prepared = await prepareQueryTables(input, h.options);
-        expect(prepared.main.tables[0].items).toHaveLength(TAG_FILE_CAP);
-        expect(prepared.main.tables[1].items).toEqual(prepared.main.tables[0].items);
-        expect(h.options.files).toHaveBeenCalledTimes(1);
-        expect(new Set(h.read.mock.calls.map(([path]) => path)).size).toBe(TAG_FILE_CAP);
-        expect(h.read).toHaveBeenCalledTimes(TAG_FILE_CAP);
-        expect(prepared.loadedPaths.some((path) => path >= "Note050.md")).toBe(true);
-        expect(prepared.loadedPaths).toEqual(sampleTagFiles(Object.keys(files).sort(), TAG_FILE_CAP, new RNG(123)));
-        expect(main.tables[0].query).toBeDefined();
-        expect(main.tables[0].items).toEqual([]);
-        expect(prepared.main.tables[0].items.some((item) =>
-            item.rawContent.includes("__queryblock:49"))).toBe(true);
-        const again = await prepareQueryTables(input, h.options);
-        expect(new Evaluator(prepared.main, prepared.extras, { seed: 123 }).run())
-            .toBe(new Evaluator(again.main, again.extras, { seed: 123 }).run());
+    test("same filter and selected note are loaded once within a scope", async () => {
+        const h = harness({ "A.md": "block" });
+        expect(await h.evaluator(
+            "Table: Main\n[@A] [@B] [@A]\nQueryTable: A=#rumour\nQueryTable: B=#rumour"
+        ).runAsync()).toBe("block block block");
+        expect(h.lookup).toHaveBeenCalledTimes(1);
+        expect(h.read).toHaveBeenCalledTimes(1);
     });
 
-    test("refresh metadata for each new preparation", async () => {
-        const metadata = { "A.md": { value: "old" } };
-        const h = harness({}, ["A.md"], metadata);
-        const first = await h.prepare("QueryTable: Q=#npc|prop:value");
-        metadata["A.md"].value = "new";
-        const second = await h.prepare("QueryTable: Q=#npc|prop:value");
-        expect(new Evaluator(first.main).run()).toBe("old");
-        expect(new Evaluator(second.main).run()).toBe("new");
+    test("identical basenames use separate private block helpers", async () => {
+        const h = harness({ "One/Same.md": "one", "Two/Same.md": "two" });
+        expect(await h.evaluator("QueryTable: Q=#rumour").evalRawTextAsync("[#1 Q] / [#2 Q]")).toBe("one / two");
     });
 
-    test("session deck shuffle restores candidates and state does not persist across evaluations", async () => {
-        const h = harness({}, ["A.md"]);
-        const prepared = await h.prepare(
-            "Table: Main\n[!Q] / [!Q] / [@Reset]\nQueryTable: Q=#npc|link\n" +
-            "Table: Reset\nShuffle: Q\n[!Q]"
-        );
-        const expected = "[[A|A]] /  / [[A|A]]";
-        expect(new Evaluator(prepared.main, prepared.extras).run()).toBe(expected);
-        expect(new Evaluator(prepared.main, prepared.extras).run()).toBe(expected);
-    });
-
-    test("shadowed declarations do not execute their queries", async () => {
-        const h = harness({});
-        const prepared = await prepareQueryTables({
-            main: parseGeneratorFile("Table: Main\n[@Q]\nQueryTable: Q=invalid"),
-            extras: [parseGeneratorFile("Table: Q\nwinner")],
-            loadedPaths: [],
-        }, h.options);
-        expect(new Evaluator(prepared.main, prepared.extras).run()).toBe("winner");
-        expect(h.options.files).not.toHaveBeenCalled();
-    });
-
-    test("read and syntax failures include query provenance", async () => {
-        const h = harness({}, ["missing.md"]);
-        await expect(h.prepare("QueryTable: Q=#rumour")).rejects.toThrow("QueryTable 'Q'");
-        await expect(h.prepare("QueryTable: Q=invalid")).rejects.toThrow("line 1");
-        await expect(h.prepare("QueryTable: Q=#npc|link", {
-            files: () => { throw new Error("metadata unavailable"); },
-        })).rejects.toThrow("metadata unavailable");
-    });
-
-    test("prepare query tables discovered from a materialized property template", async () => {
-        const h = harness({}, ["A.md"]);
-        const discover = jest.fn(async () => [
-            parseGeneratorFile("QueryTable: Other=#npc|link"),
-        ]);
-        const prepared = await h.prepare("QueryTable: Q=#npc|prop:{{name}} [@Other]", { discover });
-        expect(new Evaluator(prepared.main, prepared.extras).run()).toBe("A [[A|A]]");
-        expect(discover).toHaveBeenCalledTimes(2);
-    });
-
-    test("load note imports used by block content", async () => {
+    test("note imports and new queries load only when block content calls them", async () => {
         const h = harness({
-            "A.md": "```randomness\nUse: Helpers.rdm\n```\n\n[@Other]",
-            "Helpers.rdm": "Table: Other\nimported",
+            "A.md": "[@Needed]\n\n```randomness\nUse: Helpers.rdm\n```",
+            "Helpers.rdm": "QueryTable: Needed=#npc|link\nQueryTable: Unused=invalid",
         }, ["A.md"]);
-        const prepared = await h.prepare("QueryTable: Q=#rumour");
-        expect(new Evaluator(prepared.main, prepared.extras).runByName("Other")).toBe("imported");
-        expect(prepared.loadedPaths).toContain("Helpers.rdm");
+        expect(await h.evaluator("QueryTable: Q=#rumour").evalRawTextAsync("[@Q]")).toContain("[[A|A]]");
+        expect(h.lookup.mock.calls.map(([filter]) => filter.tagGroups)).toEqual([[["rumour"]], [["npc"]]]);
     });
 
-    test("shared builder retains the existing missing-property-provider error", () => {
+    test("runtime discovery handles templates, expression calls, counts and filter targets", async () => {
+        const h = harness({ "Other.rdm": "QueryTable: Other=#npc|prop:cr" }, ["A.md"], { "A.md": { cr: 3 } });
+        const resolve = jest.fn((name: string) => name === "other" ? ["Other.rdm"] : []);
+        const evaluator = h.evaluator("QueryTable: Q=#npc|prop:{{name}} [@Other]", { resolveTableName: resolve });
+        expect(await evaluator.runAsync()).toBe("A 3");
+        expect(resolve).toHaveBeenCalledTimes(1);
+        expect(await evaluator.evalRawTextAsync("{[@Other]+1} {count(Other)} [x >> each Other]")).toBe("4 1 3");
+    });
+
+    test("resuming loads does not replay dice, assignments or committed draws", async () => {
+        const h = harness({}, ["A.md"]);
+        const dice: number[] = [];
+        const draw = jest.fn(() => 0);
+        const evaluator = h.evaluator(
+            "Table: Main\n[!Deck]\nTable: Deck\nDeck: persistent\n{1d6} [@Q] {1d6}\nQueryTable: Q=#npc|link",
+            {}, { deckHost: { draw, reset() {} }, onDice: (entry) => dice.push(entry.total) }
+        );
+        expect(await evaluator.runAsync()).toMatch(/^\d \[\[A\|A\]\] \d$/);
+        expect(draw).toHaveBeenCalledTimes(1);
+        expect(dice).toHaveLength(2);
+        expect(h.lookup).toHaveBeenCalledTimes(1);
+    });
+
+    test("eager assignments load queries before the entry, lazy definitions only when used", async () => {
+        const h = harness({}, ["A.md"]);
+        expect(await h.evaluator(
+            "Set: initial=[@Q]\nDefine: unused=[@Bad]\nTable: Main\n{$initial}\nQueryTable: Q=#npc|link\nQueryTable: Bad=invalid"
+        ).runAsync()).toBe("[[A|A]]");
+        expect(h.lookup).toHaveBeenCalledTimes(1);
+    });
+
+    test("load failures clear the scope cache and preserve query provenance", async () => {
+        const notes: Record<string, string> = {};
+        const h = harness(notes, ["A.md"]);
+        const evaluator = h.evaluator("QueryTable: Q=#rumour");
+        await expect(evaluator.runAsync()).rejects.toThrow("query candidate");
+        notes["A.md"] = "now available";
+        expect(await evaluator.runAsync()).toBe("now available");
+        await expect(h.evaluator("QueryTable: Q=invalid").runAsync()).rejects.toThrow("QueryTable 'Q'");
+        await expect(h.evaluator("QueryTable: Q=#npc|link", {
+            files: () => { throw new Error("metadata offline"); },
+        }).runAsync()).rejects.toThrow("metadata offline");
+    });
+
+    test("shadowed queries are not evaluated", async () => {
+        const main = parseGeneratorFile("Table: Main\n[@Q]\nQueryTable: Q=invalid");
+        const extras = [parseGeneratorFile("Table: Q\nwinner")];
+        const h = harness();
+        const bundle = { main, extras, loadedPaths: [] };
+        expect(await new Evaluator(main, extras, { tableSource: createQueryTableSource(bundle, h.options) }).runAsync())
+            .toBe("winner");
+        expect(h.lookup).not.toHaveBeenCalled();
+    });
+
+    test("the shared row builder reports an unavailable property provider", () => {
         const query = parseDirectTagCall("#npc|prop:name");
-        if (!query) throw new Error("fixture query failed to parse");
+        if (!query) throw new Error("Fixture did not parse");
         expect(() => nativeQueryItems(query, ["A.md"])).toThrow("metadata cache");
     });
 });

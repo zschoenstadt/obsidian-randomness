@@ -15,7 +15,7 @@ import { parseGeneratorFile } from "../src/engine/fileParser";
 import { Evaluator } from "../src/engine/evaluator";
 import { buildInlineBundle } from "../src/resolver/scope";
 import { inMemorySource, ResolvedBundle } from "../src/resolver/fileResolver";
-import { prepareQueryTables } from "../src/resolver/queryTables";
+import { createQueryTableSource } from "../src/resolver/queryTables";
 import { TagRollFilter, matchesTagRollFilter } from "../src/resolver/mdContent";
 import { evalSourceOf } from "../src/views/lockingService";
 
@@ -63,9 +63,9 @@ function parseFakeVault(note: string): FakeNote[] {
 
 const [, , mode, ...rest] = process.argv;
 
-async function prepare(bundle: ResolvedBundle, source: string, seed?: number): Promise<ResolvedBundle> {
+function tableSource(bundle: ResolvedBundle, source: string, seed?: number) {
     const vault = parseFakeVault(source);
-    return prepareQueryTables(bundle, {
+    return createQueryTableSource(bundle, {
         seed,
         source: {
             read: async (path) => vault.find((note) => note.path === path)?.body ?? null,
@@ -86,10 +86,10 @@ async function main(): Promise<void> {
         const seedArg = mode === "gen" ? rest[2] : rest[1];
         const file = parseGeneratorFile(src);
         const seed = seedArg === undefined ? undefined : Number(seedArg);
-        const bundle = await prepare({ main: file, extras: [], loadedPaths: [] }, src, seed);
-        const ev = new Evaluator(bundle.main, bundle.extras, { seed });
+        const bundle = { main: file, extras: [], loadedPaths: [] };
+        const ev = new Evaluator(file, [], { seed, tableSource: tableSource(bundle, src, seed) });
         process.stdout.write(
-            table ? ev.runByName(table) : ev.run()
+            table ? await ev.runByNameAsync(table) : await ev.runAsync()
         );
     } else if (mode === "inline") {
         // Normalise exactly as the renderer does: a bare formula
@@ -122,9 +122,8 @@ async function main(): Promise<void> {
                 vault.find((n) => n.path === p)?.fm,
         });
         const seed = seedArg === undefined || seedArg === "" ? undefined : Number(seedArg);
-        const prepared = await prepare(bundle, noteSource, seed);
-        const ev = new Evaluator(prepared.main, prepared.extras, { seed });
-        process.stdout.write(ev.run());
+        const ev = new Evaluator(bundle.main, bundle.extras, { seed, tableSource: tableSource(bundle, noteSource, seed) });
+        process.stdout.write(await ev.runAsync());
     } else {
         process.stderr.write("modes: gen | src | inline\n");
         process.exit(2);

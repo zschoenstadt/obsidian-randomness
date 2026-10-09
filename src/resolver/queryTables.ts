@@ -1,4 +1,5 @@
-import { GeneratorFile, TableDecl } from "../engine/ast";
+import { GeneratorFile, TableDecl, tableRegistry } from "../engine/ast";
+import { EvaluationTableSource, LoadedTables } from "../engine/evaluator";
 import { RNG } from "../engine/rng";
 import { AsyncFileSource, prefetchUseGraph } from "./asyncPrefetcher";
 import { dirname, ResolvedBundle, resolveBundle } from "./fileResolver";
@@ -12,26 +13,21 @@ export interface QueryTableOptions {
     seed?: number;
     generatorRoot?: string;
     basenameResolver?: (basename: string, callerDir: string) => string | null;
-    discover?: (bundle: ResolvedBundle) => Promise<GeneratorFile[]>;
+    resolveTableName?: (name: string) => string[] | Promise<string[]>;
 }
 
-/** Materialize fresh evaluation tables without changing the parsed declarations. */
-export async function prepareQueryTables(
-    input: ResolvedBundle,
-    opts: QueryTableOptions
-): Promise<ResolvedBundle> {
-    if (![input.main, ...input.extras].some((file) => file.tables.some((table) => table.query))) {
-        return input;
-    }
-    const clone = (file: GeneratorFile): GeneratorFile => ({ ...file, tables: file.tables.slice() });
-    const bundle: ResolvedBundle = {
-        main: clone(input.main),
-        extras: input.extras.map(clone),
-        loadedPaths: input.loadedPaths.slice(),
-    };
-    const rng = new RNG(opts.seed);
-    const candidates = new Map<string, string[]>();
+/** Query rows and note reads belong to one evaluation, never the vault index. */
+export function createQueryTableSource(input: ResolvedBundle, opts: QueryTableOptions): EvaluationTableSource {
+    const initialNames = [...tableRegistry([input.main, ...input.extras]).keys()];
+    const names = new Set(initialNames);
+    const loadedPaths = new Set(input.loadedPaths);
     const reads = new Map<string, Promise<string | null>>();
+    const candidates = new Map<string, string[]>();
+    const blocks = new Map<string, string>();
+    const blockPaths = new Map<string, string>();
+    let rng: RNG | undefined;
+    let queryCount = 0;
+    let discoveredCount = 0;
     const source: AsyncFileSource = {
         exists: (path) => opts.source.exists(path),
         read: (path) => {
@@ -43,120 +39,107 @@ export async function prepareQueryTables(
             return pending;
         },
     };
-    const blockNames = new Map<string, string>();
-    let prepared = 0;
-    const allFiles = (): GeneratorFile[] => [bundle.main, ...bundle.extras];
-    const names = (): Set<string> => new Set(
-        allFiles().flatMap((file) => file.tables.map((table) => table.name.toLowerCase()))
-    );
-    const append = (file: GeneratorFile): void => {
-        const taken = names();
-        const tables = file.tables.filter((table) => {
-            const name = table.name.toLowerCase();
-            if (taken.has(name)) return false;
-            taken.add(name);
-            return true;
-        });
-        if (tables.length) bundle.extras.push({ ...file, tables });
-    };
 
-    while (true) {
-        // Match the evaluator's registration order without running shadowed queries.
-        const winning = new Map<string, TableDecl>();
-        for (const file of allFiles()) {
-            for (const table of file.tables) winning.set(table.name.toLowerCase(), table);
+    async function loadBundle(path: string, content: string): Promise<ResolvedBundle> {
+        const prefetch = await prefetchUseGraph({
+            entryPath: path, entrySource: content, source,
+            generatorRoot: opts.generatorRoot, basenameResolver: opts.basenameResolver,
+        });
+        const bundle = resolveBundle(path, content, {
+            callerDir: dirname(path), source: prefetch.source,
+            generatorRoot: opts.generatorRoot, basenameResolver: opts.basenameResolver,
+        });
+        for (const loaded of bundle.loadedPaths) loadedPaths.add(loaded);
+        for (const file of [bundle.main, ...bundle.extras]) {
+            for (const table of file.tables) names.add(table.name.toLowerCase());
         }
-        const pending: Array<{ file: GeneratorFile; index: number; table: TableDecl }> = [];
-        for (const file of allFiles()) {
-            file.tables.forEach((table, index) => {
-                if (!table.query) return;
-                if (winning.get(table.name.toLowerCase()) !== table &&
-                    table !== bundle.main.tables[0]) {
-                    const { query, ...ordinary } = table;
-                    file.tables[index] = ordinary;
-                } else {
-                    pending.push({ file, index, table });
-                }
-            });
-        }
-        if (!pending.length) break;
-        for (const { file, index, table } of pending) {
-            const declaration = table.query;
-            if (!declaration) throw new Error("Missing query declaration during preparation.");
-            if (++prepared > 64) throw new Error("QueryTable preparation exceeded the 64-declaration limit.");
-            try {
-                const query = parseQueryTableSource(declaration.source);
-                const key = JSON.stringify({ filter: query.filter, block: query.mode === "block" });
-                let paths = candidates.get(key);
-                if (!paths) {
-                    const matches = opts.files(query.filter);
-                    paths = query.mode === "block"
-                        ? sampleTagFiles(matches, TAG_FILE_CAP, rng)
-                        : matches;
-                    candidates.set(key, paths);
-                }
-                if (query.mode === "block") {
-                    for (const path of paths) {
-                        if (blockNames.has(path)) continue;
-                        const content = await source.read(path);
-                        if (content === null) throw new Error(`Could not read query candidate '${path}'.`);
-                        const prefetch = await prefetchUseGraph({
-                            entryPath: path,
-                            entrySource: content,
-                            source,
-                            generatorRoot: opts.generatorRoot,
-                            basenameResolver: opts.basenameResolver,
-                        });
-                        const noteBundle = resolveBundle(path, content, {
-                            callerDir: dirname(path),
-                            source: prefetch.source,
-                            generatorRoot: opts.generatorRoot,
-                            basenameResolver: opts.basenameResolver,
-                        });
-                        const taken = names();
-                        let suffix = blockNames.size;
-                        let helperName = `__queryblock:${suffix}`;
-                        while (taken.has(helperName.toLowerCase())) helperName = `__queryblock:${++suffix}`;
-                        blockNames.set(path, helperName);
-                        append({
-                            uses: [],
-                            topLevelSets: [],
-                            prompts: [],
-                            tables: [{
-                                name: helperName,
-                                hidden: true,
-                                type: "weighted",
-                                shuffleTargets: [],
-                                inTableSets: [],
-                                items: extractNoteBlocks(content).map((rawContent) => ({ weight: 1, rawContent })),
-                            }],
-                        });
-                        append(noteBundle.main);
-                        for (const extra of noteBundle.extras) append(extra);
-                        for (const loaded of noteBundle.loadedPaths) {
-                            if (!bundle.loadedPaths.includes(loaded)) bundle.loadedPaths.push(loaded);
-                        }
-                    }
-                }
-                const { query: unresolved, ...ordinary } = table;
-                file.tables[index] = {
-                    ...ordinary,
-                    items: nativeQueryItems(query, paths, opts.frontmatter, (path) => {
-                        const name = blockNames.get(path);
-                        if (!name) throw new Error(`Missing prepared block table for '${path}'.`);
-                        return name;
-                    }),
-                };
-            } catch (error: unknown) {
-                throw new Error(
-                    `QueryTable '${table.name}' (${declaration.path ?? "generator"}, line ${declaration.line}): ` +
-                    (error instanceof Error ? error.message : String(error))
-                );
+        return bundle;
+    }
+
+    function blockName(path: string): string {
+        const cached = blocks.get(path);
+        if (cached) return cached;
+        let suffix = blocks.size;
+        let name = `__queryblock:${suffix}`;
+        while (names.has(name)) name = `__queryblock:${++suffix}`;
+        names.add(name);
+        blocks.set(path, name);
+        blockPaths.set(name, path);
+        return name;
+    }
+
+    async function loadQuery(table: TableDecl): Promise<LoadedTables> {
+        const declaration = table.query;
+        if (!declaration) throw new Error(`Table '${table.name}' is not a query.`);
+        if (++queryCount > 64) throw new Error("QueryTable loading exceeded the 64-query limit.");
+        try {
+            const query = parseQueryTableSource(declaration.source);
+            const key = JSON.stringify({ filter: query.filter, block: query.mode === "block" });
+            let paths = candidates.get(key);
+            if (!paths) {
+                const matches = opts.files(query.filter);
+                paths = query.mode === "block"
+                    ? sampleTagFiles(matches, TAG_FILE_CAP, rng ??= new RNG(opts.seed))
+                    : matches;
+                candidates.set(key, paths);
             }
-        }
-        if (opts.discover) {
-            for (const extra of await opts.discover(bundle)) append(extra);
+            const { query: unresolved, ...ordinary } = table;
+            return {
+                table: { ...ordinary, items: nativeQueryItems(query, paths, opts.frontmatter, blockName) },
+                files: [],
+            };
+        } catch (error: unknown) {
+            throw new Error(
+                `QueryTable '${table.name}' (${declaration.path ?? "generator"}, line ${declaration.line}): ` +
+                (error instanceof Error ? error.message : String(error))
+            );
         }
     }
-    return bundle;
+
+    return {
+        async load(name, query) {
+            if (query) return loadQuery(query);
+            const path = blockPaths.get(name.toLowerCase());
+            if (path) {
+                const content = await source.read(path);
+                if (content === null) throw new Error(`Could not read query candidate '${path}'.`);
+                const bundle = await loadBundle(path, content);
+                const helper: GeneratorFile = {
+                    uses: [], topLevelSets: [], prompts: [],
+                    tables: [{
+                        name, hidden: true, type: "weighted", shuffleTargets: [], inTableSets: [],
+                        items: extractNoteBlocks(content).map((rawContent) => ({ weight: 1, rawContent })),
+                    }],
+                };
+                return { files: [helper, bundle.main, ...bundle.extras] };
+            }
+            const paths = await opts.resolveTableName?.(name.toLowerCase());
+            const target = paths?.[0];
+            if (!target || loadedPaths.has(target)) return undefined;
+            if (++discoveredCount > 64) throw new Error("Table discovery exceeded the 64-file limit.");
+            const content = await source.read(target);
+            if (content === null) throw new Error(`Could not read table '${name}' from '${target}'.`);
+            const bundle = await loadBundle(target, content);
+            // Auto-discovery contributes tables, not the defining file's global assignments.
+            return {
+                files: [{
+                    uses: [], topLevelSets: [], prompts: [],
+                    tables: [bundle.main, ...bundle.extras].flatMap((file) => file.tables)
+                        .filter((table) => !blockPaths.has(table.name.toLowerCase())),
+                }],
+            };
+        },
+        clear() {
+            reads.clear();
+            candidates.clear();
+            blocks.clear();
+            blockPaths.clear();
+            names.clear();
+            for (const name of initialNames) names.add(name);
+            loadedPaths.clear();
+            for (const path of input.loadedPaths) loadedPaths.add(path);
+            rng = undefined;
+            queryCount = discoveredCount = 0;
+        },
+    };
 }

@@ -1196,15 +1196,12 @@ and aliases still count. `has *` looks for a literal `*`
 item, not any item. `folder=` remains a folder filter; it doesn't
 take comparison operators or `has`.
 
-Tag rolls use Obsidian's own metadata cache — no Dataview required.
-The note pick happens inside the engine, so seeded rolls are
-reproducible and every re-roll may pick a different note.
+Tag rolls need no Dataview. Every re-roll may pick a different
+note; the same seed and matching notes give the same result.
 
 `link`, `linkpath` and `prop:` rolls consider **every** matching note,
-however many there are — they only need the note's path and its
-properties. A block roll (`rdm:#tag` with no mode) has to read each
-candidate note's text, so it draws from a random sample of 50 of the
-matching notes rather than all of them.
+however many there are. A block roll (`rdm:#tag` with no mode) draws
+from a random sample of up to 50 matching notes instead.
 
 #### More than one note per call
 
@@ -1852,9 +1849,8 @@ group as your inline call: one `Ctrl-Z` undoes both the
 inserted table name AND the auto-added `Use:` line if you
 change your mind.
 
-If the `Use:` line is already present (e.g. the cache was
-stale and the table was actually in scope), the operation is a
-no-op — no duplicate lines.
+If the `Use:` line is already present, Randomness doesn't add
+a second one.
 
 ## Referencing generators by name
 
@@ -2026,8 +2022,8 @@ tR += note ? `Tonight: ${note.link}` : "_no notes in that folder_";
 `randomNote(folder?, { seed? })` searches the folder recursively
 (whole vault when omitted) and returns
 `{ path, basename, link, frontmatter }`, or `null` for an empty
-folder. `frontmatter` is the note's properties straight from
-Obsidian's metadata cache — `{}` when it has none, so
+folder. `frontmatter` holds the note's properties — `{}` when it
+has none, so
 `note.frontmatter.cr` is always safe to reach for.
 
 ## Scripting API

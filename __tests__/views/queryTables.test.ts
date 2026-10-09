@@ -2,6 +2,7 @@
  * @jest-environment jsdom
  */
 import { TFile, WorkspaceLeaf } from "obsidian";
+import { deserialize, serialize } from "v8";
 import { createApi } from "../../src/api";
 import { DeckService, FolderDeck } from "../../src/decks/deckService";
 import { VaultIndex } from "../../src/resolver/vaultIndex";
@@ -29,6 +30,7 @@ function fixture(files: Record<string, string>) {
         frontmatter: file.path === "NPC.md" ? { cr: 3, rumours: ["one", "two"] } : {},
     }));
     const plugin = {
+        manifest: { dir: ".obsidian/plugins/randomness" },
         app: {
             vault: {
                 adapter: { read, exists: async (path: string) => path in files },
@@ -67,6 +69,45 @@ describe("named queries across plugin surfaces", () => {
         expect(await rollTable(plugin as never, "queries.rdm", "Filtered")).toBe("NPC (CR 3)");
         await expect(evaluateInlineExpression("#npc|cr>3|link", "Note.md", plugin as never))
             .rejects.toThrow("No notes found");
+    });
+
+    const originalClone = Object.getOwnPropertyDescriptor(globalThis, "structuredClone");
+    beforeAll(() => {
+        Object.defineProperty(globalThis, "structuredClone", {
+            value: (value: unknown) => deserialize(serialize(value)), configurable: true,
+        });
+    });
+    afterAll(() => {
+        if (originalClone) Object.defineProperty(globalThis, "structuredClone", originalClone);
+        else Reflect.deleteProperty(globalThis, "structuredClone");
+    });
+
+    test("inline and named rolls leave unused queries untouched, including imported declarations", async () => {
+        const { plugin, cache, read } = fixture({
+            "queries.rdm": "QueryTable: Unused=#npc\nTable: Static\nhello",
+            "Note.md": "```randomness\nUse: queries.rdm\nTable: Main\n[@Static]\n```",
+            "NPC.md": NPC,
+        });
+        expect(await evaluateInlineExpression("[@Static]", "Note.md", plugin as never)).toBe("hello");
+        expect(await rollTable(plugin as never, "queries.rdm", "Static")).toBe("hello");
+        expect((await createApi(plugin as never).rollUnscoped("Static", { filePath: "queries.rdm" })).result)
+            .toBe("hello");
+        expect(cache).not.toHaveBeenCalled();
+        expect(read.mock.calls.some(([path]) => path === "NPC.md")).toBe(false);
+    });
+
+    test("discovery follows only reachable definitions rather than unused table references", async () => {
+        const { plugin, read, cache } = fixture({
+            "queries.rdm": "QueryTable: People=#npc|link",
+            "Note.md": "```randomness\nTable: Main\nhello\nTable: Other\n[@People]\n```",
+            "NPC.md": NPC,
+        });
+        // Indexing reads defining files once; the roll itself must not discover them again.
+        await plugin.vaultIndex.prewarm();
+        read.mockClear();
+        expect(await evaluateInlineExpression("[@Main]", "Note.md", plugin as never)).toBe("hello");
+        expect(read.mock.calls.some(([path]) => path === "queries.rdm")).toBe(false);
+        expect(cache).not.toHaveBeenCalled();
     });
 
     test("inline reference inside prose and API scoped rolls", async () => {
@@ -163,5 +204,71 @@ describe("named queries across plugin surfaces", () => {
         };
         const result = await new DeckService(plugin as never).resolveDraw(deck, 0, "upright");
         expect(result.text).toBe("Meet NPC (CR 3).");
+    });
+
+    test("a selected card does not prepare unused queries in its generator", async () => {
+        const cardSource = "Table: Cards\nType: dictionary\nstatic: hello\nQueryTable: Unused=#npc";
+        const { plugin, cache, read } = fixture({ "Cards.rdm": cardSource, "NPC.md": NPC });
+        const deck: FolderDeck = {
+            name: "Cards", folderPath: "Cards",
+            cards: [{ name: "static", textKey: "static" }],
+            settings: { flip: 0 },
+            state: { total: 1, remaining: [0], drawn: [], removed: [] },
+            rdmSource: cardSource, rdmPath: "Cards.rdm", tableName: "Cards",
+        };
+        const result = await new DeckService(plugin as never).resolveDraw(deck, 0, "upright");
+        expect(result.text).toBe("hello");
+        expect(cache).not.toHaveBeenCalled();
+        expect(read.mock.calls.some(([path]) => path === "NPC.md")).toBe(false);
+    });
+
+    test("deck hosts load no query data until a card is drawn", async () => {
+        const sources = {
+            "First.rdm": "Table: Cards\n[!deck:Second]\nQueryTable: Unused=#npc",
+            "Second.rdm": `Table: Cards\n[@People]\n${QUERY}`,
+            "Unused.rdm": `Table: Cards\n[@People]\n${QUERY}`,
+            "NPC.md": NPC,
+        };
+        const { plugin, cache } = fixture(sources);
+        const service = new DeckService(plugin as never);
+        const deck = (name: string, rawText: string): FolderDeck => ({
+            name, folderPath: name,
+            cards: [{ name: "card", rawText }],
+            settings: { flip: 0 },
+            state: { total: 1, remaining: [0], drawn: [], removed: [] },
+            rdmSource: sources[`${name}.rdm` as keyof typeof sources],
+            rdmPath: `${name}.rdm`, tableName: "Cards",
+        });
+        const first = deck("First", "[!deck:Second]");
+        const second = deck("Second", "[@People]");
+        const unused = deck("Unused", "[@People]");
+        jest.spyOn(service, "listDecks").mockResolvedValue([first, second, unused]);
+        const hosts = await service.buildEvalHosts("Note.md", false);
+        expect(cache).not.toHaveBeenCalled();
+        expect(await hosts.folderDeckHost.drawAsync?.("Second")).toContain("NPC (CR 3)");
+        expect(cache).toHaveBeenCalledTimes(2);
+        expect(first.state.remaining).toEqual([0]);
+        expect(second.state.remaining).toEqual([0]);
+        expect(unused.state.remaining).toEqual([0]);
+    });
+
+    test("committing hosts do not run queries or consume cards during construction", async () => {
+        const source = `Table: Cards\n[@People]\n${QUERY}`;
+        const { plugin, cache } = fixture({ "Cards.rdm": source, "NPC.md": NPC });
+        const service = new DeckService(plugin as never);
+        const deck: FolderDeck = {
+            name: "Cards", folderPath: "Cards",
+            cards: [{ name: "card", rawText: "[@People]" }],
+            settings: { flip: 0 },
+            state: { total: 1, remaining: [0], drawn: [], removed: [] },
+            rdmSource: source, rdmPath: "Cards.rdm", tableName: "Cards",
+        };
+        jest.spyOn(service, "listDecks").mockResolvedValue([deck]);
+        const hosts = await service.buildEvalHosts("Note.md", true);
+        expect(cache).not.toHaveBeenCalled();
+        expect(deck.state.remaining).toEqual([0]);
+        expect(await hosts.folderDeckHost.drawAsync?.("Cards")).toContain("NPC (CR 3)");
+        expect(cache).toHaveBeenCalledTimes(2);
+        expect(deck.state.remaining).toEqual([]);
     });
 });

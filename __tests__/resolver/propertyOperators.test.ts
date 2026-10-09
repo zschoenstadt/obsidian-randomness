@@ -3,7 +3,7 @@ import { parseGeneratorFile } from "../../src/engine/fileParser";
 import { translateDiceExpression } from "../../src/compat/diceCompat";
 import { inMemorySource } from "../../src/resolver/fileResolver";
 import { matchesTagRollFilter, parseDirectTagCall } from "../../src/resolver/mdContent";
-import { prepareQueryTables } from "../../src/resolver/queryTables";
+import { createQueryTableSource } from "../../src/resolver/queryTables";
 import { buildInlineBundle } from "../../src/resolver/scope";
 
 function matches(segment: string, metadata: Record<string, unknown>): boolean {
@@ -89,14 +89,13 @@ describe("operator queries across inline and named tables", () => {
         expect(matchesTagRollFilter(new Set(["monster"]), fm, query.filter)).toBe(true);
         expect(matchesTagRollFilter(new Set(["monster"]), { stats: { "challenge-rating": 6, types: ["undead"] } }, query.filter))
             .toBe(false);
-        const prepared = await prepareQueryTables({
-            main: parseGeneratorFile(`QueryTable: Q=${expression}`), extras: [], loadedPaths: [],
-        }, {
+        const bundle = { main: parseGeneratorFile(`QueryTable: Q=${expression}`), extras: [], loadedPaths: [] };
+        const source = createQueryTableSource(bundle, {
             source: { read: async () => null, exists: async () => false },
             files: (filter) => matchesTagRollFilter(new Set(["monster"]), fm, filter) ? ["A.md"] : [],
             frontmatter: () => fm,
         });
-        expect(new Evaluator(prepared.main, prepared.extras).run()).toBe("4");
+        expect(await new Evaluator(bundle.main, [], { tableSource: source }).runAsync()).toBe("4");
     });
 
     const metadata: Record<string, Record<string, unknown>> = {
@@ -119,14 +118,13 @@ describe("operator queries across inline and named tables", () => {
             tagFiles: files, tagFrontmatter: (path) => metadata[path],
         });
         expect(new Evaluator(inline.main, inline.extras).run()).toBe("B CR 4");
-        const prepared = await prepareQueryTables({
-            main: parseGeneratorFile(`QueryTable: Q=${source}`), extras: [], loadedPaths: [],
-        }, {
+        const bundle = { main: parseGeneratorFile(`QueryTable: Q=${source}`), extras: [], loadedPaths: [] };
+        const tableSource = createQueryTableSource(bundle, {
             source: { read: async () => null, exists: async () => false },
             files, frontmatter: (path) => metadata[path],
         });
-        expect(prepared.main.tables[0].items).toHaveLength(1);
-        expect(new Evaluator(prepared.main, prepared.extras).run()).toBe("B CR 4");
+        expect(await new Evaluator(bundle.main, [], { tableSource }).evalRawTextAsync("{count(Q)}: [@Q]"))
+            .toBe("1: B CR 4");
     });
 
     test("prop template content is not parsed as a filter", () => {

@@ -942,8 +942,8 @@ export interface TagPropFilter {
     key: string;
     operator?: "=" | ">" | ">=" | "<" | "<=" | "has";
     /**
-     * Accepted values (OR). With equality, `"*"` means the property
-     * exists with a non-empty value; with has it is literal.
+     * Accepted values (OR). `"*"` means the property exists with a
+     * non-empty value, regardless of the operator.
      */
     values: string[];
 }
@@ -1285,7 +1285,7 @@ function parseTagCall(expr: string, resolve: (name: string) => Value): DirectTag
                 throw new Error(`Invalid property filter '${seg}': expected a value.`);
             }
             if (operator !== "=" && operator !== "has" &&
-                values.some((value) => numericPropertyValue(value) === undefined)) {
+                values.some((value) => value !== "*" && numericPropertyValue(value) === undefined)) {
                 throw new Error(`Invalid property filter '${seg}': comparisons require finite numbers.`);
             }
             if (key.toLowerCase() === "folder") {
@@ -1415,8 +1415,12 @@ export function matchesTagRollFilter(
     for (const p of filter.props) {
         const raw = frontmatterProperty(fm, p.key);
         const operator = p.operator ?? "=";
-        if (operator === "has" && !Array.isArray(raw)) return false;
         const list = Array.isArray(raw) ? raw : raw == null ? [] : [raw];
+        if (p.values.includes("*")) {
+            if (!list.some((value) => frontmatterValueForms(value).length > 0)) return false;
+            continue;
+        }
+        if (operator === "has" && !Array.isArray(raw)) return false;
         if (operator !== "=" && operator !== "has") {
             const ok = list.some((value) => {
                 const number = numericPropertyValue(value);
@@ -1440,9 +1444,7 @@ export function matchesTagRollFilter(
             for (const c of frontmatterValueForms(v)) forms.add(c);
         }
         if (forms.size === 0) return false;
-        const ok = p.values.some((want) =>
-            operator === "=" && want === "*" ? true : forms.has(want.toLowerCase())
-        );
+        const ok = p.values.some((want) => forms.has(want.toLowerCase()));
         if (!ok) return false;
     }
     return true;

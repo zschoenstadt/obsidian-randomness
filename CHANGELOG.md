@@ -17,6 +17,9 @@ All notable changes to the Randomness plugin.
   results, while repeated rolls remain deterministic.
 - **Property names can start with a hyphen.** `prop:-value` and
   `prop:-` now work in tag rolls, including query tables.
+- **`*` checks property existence with every operator.** Equality,
+  numeric comparisons, and `has` all accept it and match a non-empty
+  property. `has *` no longer looks for a literal star item.
 
 ### Added
 - **Pick tag rolls by a range or a list item.** `cr>=3|cr<=5`

@@ -66,7 +66,7 @@ describe("list membership", () => {
         expect(matches("levels has 3", { levels: [3] })).toBe(true);
         expect(matches("worlds has Eldara", { worlds: ["[[Worlds/Eldara|The Realm]]"] })).toBe(true);
         expect(matches("worlds has The Realm", { worlds: ["[[Worlds/Eldara|The Realm]]"] })).toBe(true);
-        expect(matches("types has *", { types: ["fey"] })).toBe(false);
+        expect(matches("types has *", { types: ["fey"] })).toBe(true);
         expect(matches("types has *", { types: ["*"] })).toBe(true);
         expect(matches("types has a=b", { types: ["a=b"] })).toBe(true);
     });
@@ -80,7 +80,7 @@ describe("list membership", () => {
     });
 });
 
-describe("operator queries across inline and named tables", () => {
+describe("nested and variable property filters", () => {
     test("variables combine with nested numeric comparisons and list membership", async () => {
         const metadata = {
             "A.md": { Stats: { "challenge-rating": 2, Types: ["undead"] } },
@@ -143,6 +143,73 @@ describe("operator queries across inline and named tables", () => {
         expect(await new Evaluator(bundle.main, [], { tableSource: source }).runAsync()).toBe("4");
     });
 
+});
+
+describe.each(["=", ">", ">=", "<", "<=", "has"])("property-existence wildcard with %s", (operator) => {
+    const segment = (values = "*") => operator === "has" ? `value has ${values}` : `value${operator}${values}`;
+
+    test.each([
+        ["text", true],
+        [" text ", true],
+        [0, true],
+        [-3, true],
+        [false, true],
+        [{ child: "text" }, true],
+        [["fey"], true],
+        [["", "text"], true],
+        [[""], false],
+        [["", " "], false],
+        [[], false],
+        ["", false],
+        [" ", false],
+        [null, false],
+        [undefined, false],
+    ])("value %j matches %s", (value, expected) => {
+        expect(matches(segment(), { value })).toBe(expected);
+        expect(matches(segment(), { value })).toBe(matches("value=*", { value }));
+    });
+
+    test("missing metadata or property does not match", () => {
+        expect(matches(segment(), {})).toBe(false);
+        const query = parseDirectTagCall(`*|${segment()}|link`);
+        if (!query) throw new Error("Wildcard query did not parse");
+        expect(matchesTagRollFilter(new Set(), undefined, query.filter)).toBe(false);
+    });
+
+    test("wildcard alternatives remain OR, while other filter segments remain AND", () => {
+        expect(matches(segment("999,*"), { value: "nonnumeric" })).toBe(true);
+        expect(matches(segment("*,999"), { value: ["fey"] })).toBe(true);
+        expect(matches(segment("*,999"), {})).toBe(false);
+        expect(matches(`${segment()}|region=North`, { value: "text", region: "South" })).toBe(false);
+        expect(matches(`${segment()}|region=North`, { value: "text", region: "North" })).toBe(true);
+    });
+
+    test("inline and dice-compatible rolls retain the operator and select the same notes", () => {
+        const source = `#monster|${segment()}|prop:{{name}}`;
+        const query = parseDirectTagCall(source);
+        if (!query) throw new Error("Wildcard query did not parse");
+        expect(query.filter.props).toEqual([{
+            key: "value", values: ["*"], ...(operator === "=" ? {} : { operator }),
+        }]);
+        expect(query.label).toBe(`#monster|${segment()}`);
+        expect(translateDiceExpression(source).expr).toBe(source);
+        const metadata: Record<string, Record<string, unknown>> = {
+            "Present.md": { value: "nonnumeric scalar" },
+            "Empty.md": { value: "" },
+            "Missing.md": {},
+        };
+        const inline = buildInlineBundle(source, {
+            notePath: "Note.md", noteSource: "", source: inMemorySource({}),
+            tagFiles: (filter) => Object.keys(metadata).filter((path) =>
+                matchesTagRollFilter(new Set(["monster"]), metadata[path], filter)
+            ),
+            tagFrontmatter: (path) => metadata[path],
+        });
+        expect(new Evaluator(inline.main, inline.extras, { seed: 1 }).run()).toBe("Present");
+    });
+});
+
+describe("operator queries through inline rolls", () => {
     const metadata: Record<string, Record<string, unknown>> = {
         "A.md": { cr: 2, types: ["undead"] },
         "B.md": { cr: 4, types: ["undead"] },
@@ -162,6 +229,7 @@ describe("operator queries across inline and named tables", () => {
             notePath: "Note.md", noteSource: "", source: inMemorySource({}),
             tagFiles: files, tagFrontmatter: (path) => metadata[path],
         });
+
         expect(new Evaluator(inline.main, inline.extras).run()).toBe("B CR 4");
         const bundle = { main: parseGeneratorFile(`QueryTable: Q=${source}`), extras: [], loadedPaths: [] };
         const tableSource = createQueryTableSource(bundle, {
@@ -176,5 +244,41 @@ describe("operator queries across inline and named tables", () => {
         const query = parseDirectTagCall("#monster|prop:{{name}} has undead > 3");
         expect(query?.filter.props).toEqual([]);
         expect(query?.template).toBe("{{name}} has undead > 3");
+    });
+
+    test.each(["=", ">", ">=", "<", "<=", "has"])("reuse a variable-bound nested wildcard with %s", async (operator) => {
+        const metadata: Record<string, Record<string, unknown>> = {
+            "Present.md": { Stats: { Value: "nonnumeric scalar" } },
+            "Empty.md": { Stats: { Value: "" } },
+            "Missing.md": { Stats: {} },
+            "Absent.md": {},
+        };
+        const segment = operator === "has" ? "{$property} has {$wanted}" : `{$property}${operator}{$wanted}`;
+        const main = parseGeneratorFile(
+            "Table: Main\nSet: property=stats.value\nSet: wanted=*\n" +
+            "[@Q] / {wanted==999}[@Q] / {wanted=='*'}[@Q]\n" +
+            `QueryTable: Q=#monster|${segment}|prop:{{name}}\nDefault: none`
+        );
+        const files = jest.fn((filter: Parameters<typeof matchesTagRollFilter>[2]) =>
+            Object.keys(metadata).filter((path) =>
+                matchesTagRollFilter(new Set(["monster"]), metadata[path], filter, path)
+            )
+        );
+        const source = createQueryTableSource({ main, extras: [], loadedPaths: [] }, {
+            source: { read: async () => null, exists: async () => false },
+            files, frontmatter: (path) => metadata[path],
+        });
+        expect(await new Evaluator(main, [], { tableSource: source }).runAsync())
+            .toBe("Present / none / Present");
+        expect(files).toHaveBeenCalledTimes(2);
+        expect(files.mock.calls[0][0].props).toEqual([{
+            key: "stats.value", values: ["*"], ...(operator === "=" ? {} : { operator }),
+        }]);
+    });
+
+    test("wildcards do not relax other numeric validation or folder restrictions", () => {
+        expect(() => parseDirectTagCall("*|value>*,nonnumeric|link")).toThrow("finite numbers");
+        expect(() => parseDirectTagCall("*|folder>*|link")).toThrow("Folder filters only support");
+        expect(() => parseDirectTagCall("*|folder has *|link")).toThrow("Folder filters only support");
     });
 });

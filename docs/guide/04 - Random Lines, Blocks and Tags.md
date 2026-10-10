@@ -87,6 +87,10 @@ That finds `types: [fey, undead]`, not `types: [undead warrior]`.
 Capital letters don't matter. `has` is for list properties,
 not a search inside a sentence.
 
+With `*`, every property operator just checks that the property
+has a non-empty value: `cr=*`, `cr>*`, and `cr has *` mean the
+same thing. This also works for text, not only numbers or lists.
+
 ## More than one at a time
 
 Put a number in front, exactly as you would for a line roll:

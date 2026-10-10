@@ -108,7 +108,7 @@ export function buildInlineBundle(
     // seeded rolls stay deterministic and re-rolls re-pick the note.
     let tagTable: TableDecl | null = null;
     let tagUses: string[] = [];
-    const tag = direct === null ? parseDirectTagCall(expr) : null;
+    const tag = direct === null ? parseDirectTagCall(expr, {}) : null;
     if (tag !== null) {
         if (!opts.tagFiles) {
             throw new Error(

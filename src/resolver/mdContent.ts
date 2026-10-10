@@ -36,6 +36,8 @@
  */
 
 import { TableDecl, TableItem } from "../engine/ast";
+import { variableName } from "../engine/contentParser";
+import type { Value } from "../engine/expressions";
 import { translateDiceExpression } from "../compat/diceCompat";
 
 // ────────────────────────────────────────────────────────────────────
@@ -1020,6 +1022,22 @@ const PROP_PLACEHOLDER_RE = /\{\{\s*([^{}]+?)\s*\}\}/g;
 /** What a bare `prop:cr` shorthand is allowed to look like. */
 const BARE_PROP_KEY_RE = /^[A-Za-z0-9_-][A-Za-z0-9_ .-]*$/;
 
+export type TagVariableBindings = Readonly<Record<string, Value>>;
+
+function substituteTagField(field: string, resolve: (name: string) => Value): string {
+    return field.replace(/\\[\s\S]|\{([^{}]+)\}/g, (token: string, inner: string | undefined, offset: number) => {
+        if (inner === undefined || field[offset - 1] === "{" || field[offset + token.length] === "}") return token;
+        const name = variableName(inner);
+        return name === undefined ? token : String(resolve(name.toLowerCase()));
+    });
+}
+
+export function tagVariableNames(source: string): string[] {
+    const names = new Set<string>();
+    parseTagCall(source, (name) => { names.add(name); return "0"; });
+    return [...names];
+}
+
 /** Every distinct placeholder name used by a template, in order. */
 export function propTemplateKeys(template: string): string[] {
     const out: string[] = [];
@@ -1139,7 +1157,16 @@ function formatFrontmatterValue(v: unknown): string {
  * to the template (so `{{link}}`-style wikilinks with aliases survive)
  * — and so must come last.
  */
-export function parseDirectTagCall(expr: string): DirectTagCall | null {
+export function parseDirectTagCall(expr: string, variables: TagVariableBindings = {}): DirectTagCall | null {
+    const bindings = new Map(Object.entries(variables).map(([name, value]) => [name.toLowerCase(), value]));
+    return parseTagCall(expr, (name) => {
+        const value = bindings.get(name);
+        if (value === undefined) throw new Error(`Tag roll variable '{$${name}}' isn't available in this context.`);
+        return value;
+    });
+}
+
+function parseTagCall(expr: string, resolve: (name: string) => Value): DirectTagCall | null {
     let s = expr.trim();
     // Optional repetition prefix, stripped before anything else so the
     // rest of the grammar is unchanged: `3#npc`, `{1d4}*|folder=X`.
@@ -1147,6 +1174,7 @@ export function parseDirectTagCall(expr: string): DirectTagCall | null {
     const reps = repsMatch ? repsMatch[1] : "";
     if (repsMatch) s = s.slice(repsMatch[0].length).trim();
     if (!s.startsWith("#") && !s.startsWith("*")) return null;
+    const substitute = (field: string) => substituteTagField(field, resolve);
     // Raw (untrimmed) segments are kept alongside the trimmed ones so
     // a `prop:` template can be rebuilt with its internal spacing and
     // pipes intact.
@@ -1160,7 +1188,7 @@ export function parseDirectTagCall(expr: string): DirectTagCall | null {
     const parseTagGroup = (seg: string): string[] | null => {
         const parts = seg
             .split(",")
-            .map((x) => x.trim())
+            .map((x) => substitute(x).trim())
             .filter((x) => x !== "");
         if (parts.length === 0) return null;
         const group: string[] = [];
@@ -1246,11 +1274,11 @@ export function parseDirectTagCall(expr: string): DirectTagCall | null {
             ? seg.match(/^([^<>=]+?)\s*(>=|<=|>|<|=)\s*(.*)$/)
             : null;
         if (comparison || membership) {
-            const key = (comparison?.[1] ?? membership?.[1] ?? "").trim();
+            const key = substitute(comparison?.[1] ?? membership?.[1] ?? "").trim();
             const operator = comparison?.[2] ?? "has";
             const values = (comparison?.[3] ?? membership?.[2] ?? "")
                 .split(",")
-                .map((v) => v.trim())
+                .map((v) => substitute(v).trim())
                 .filter((v) => v !== "");
             if (key === "" || values.length === 0) {
                 if (operator === "=") return null;

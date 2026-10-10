@@ -10,7 +10,7 @@ import { discoverGenerators, rollTable } from "../../src/views/browserView";
 import { buildCodeblockProcessor } from "../../src/views/codeblockProcessor";
 import { evaluateInlineExpression } from "../../src/views/inlineProcessor";
 import { IptView } from "../../src/views/iptView";
-import { PreviewRegistry } from "../../src/views/lockingService";
+import { PreviewRegistry, evalSourceOf } from "../../src/views/lockingService";
 import { DEFAULT_SETTINGS } from "../../src/views/settings";
 
 function fixture(files: Record<string, string>) {
@@ -80,6 +80,109 @@ describe("named queries across plugin surfaces", () => {
     afterAll(() => {
         if (originalClone) Object.defineProperty(globalThis, "structuredClone", originalClone);
         else Reflect.deleteProperty(globalThis, "structuredClone");
+    });
+
+    test("direct inline filter variables fail before any vault work, including dice compatibility", async () => {
+        const { plugin, cache, read } = fixture({ "Note.md": "", "NPC.md": NPC });
+        for (const prefix of ["rdm:", "dice:"] as const) {
+            const expression = evalSourceOf({ expr: "#npc|cr={$level}|link", prefix });
+            await expect(evaluateInlineExpression(expression, "Note.md", plugin as never))
+                .rejects.toThrow("isn't available in this context");
+        }
+        expect(cache).not.toHaveBeenCalled();
+        expect(read).not.toHaveBeenCalled();
+    });
+
+    test("inline prop output retains same-note RDM scope and ordinary missing-variable behavior", async () => {
+        const note = "```randomness\nSet: level=9\nTable: Local\nplain\n```";
+        const { plugin } = fixture({ "Note.md": note, "Empty.md": "", "NPC.md": NPC });
+        expect(await evaluateInlineExpression("#npc|prop:{{name}} / {$level}", "Note.md", plugin as never))
+            .toBe("NPC / 9");
+        expect(await evaluateInlineExpression("#npc|prop:{{name}} / {$level}", "Empty.md", plugin as never))
+            .toBe("NPC / ");
+    });
+
+    test("named query calls from inline and scoped API expressions receive RDM variables", async () => {
+        const note = "```randomness\nSet: level=3\nQueryTable: People=#npc|cr={$level}|prop:{{name}} (CR {{cr}})\nDefault: nobody\n```";
+        const { plugin } = fixture({ "Note.md": note, "NPC.md": NPC });
+        expect(await evaluateInlineExpression("[@People] / {level==4}[@People] / {level==3}[@People]", "Note.md", plugin as never))
+            .toBe("NPC (CR 3) / nobody / NPC (CR 3)");
+        expect((await createApi(plugin as never).roll("People")).result).toBe("NPC (CR 3)");
+    });
+
+    test("main/named generator rolls and API prompt overrides supply current variables", async () => {
+        const source = "Prompt: Level {3|4} 3\nQueryTable: People=#npc|cr={$level}|prop:{{name}}\nDefault: nobody";
+        const { plugin } = fixture({ "queries.rdm": source, "NPC.md": NPC, "Note.md": "" });
+        expect(await rollTable(plugin as never, "queries.rdm", "People")).toBe("NPC");
+        const api = createApi(plugin as never);
+        expect((await api.rollUnscoped("People", { filePath: "queries.rdm", promptValues: { Level: "4" } })).result)
+            .toBe("nobody");
+        expect((await api.rollUnscoped("People", { filePath: "queries.rdm", promptValues: { Level: "3" } })).result)
+            .toBe("NPC");
+    });
+
+    test("auto-discovered query declarations use the caller's variable scope", async () => {
+        const { plugin } = fixture({
+            "queries.rdm": "QueryTable: People=#npc|cr={$level}|prop:{{name}}",
+            "Note.md": "```randomness\nSet: level=3\nTable: Local\nplain\n```",
+            "NPC.md": NPC,
+        });
+        expect(await evaluateInlineExpression("[@People]", "Note.md", plugin as never)).toBe("NPC");
+    });
+
+    test("codeblocks can use a variable-dependent query defined elsewhere in the same note", async () => {
+        const source = "Table: Main\nSet: level=3\nHello [@People].";
+        const query = "QueryTable: People=#npc|cr={$level}|prop:{{name}}";
+        const note = `\`\`\`randomness\n${source}\n\`\`\`\n\n\`\`\`randomness\n${query}\n\`\`\``;
+        const { plugin } = fixture({ "Note.md": note, "NPC.md": NPC });
+        const element = document.createElement("div");
+        await buildCodeblockProcessor(plugin as never)(source, element, {
+            sourcePath: "Note.md", addChild() {},
+            getSectionInfo: () => ({ lineStart: 0, lineEnd: 3, text: note }),
+        } as never);
+        expect(element.textContent).toContain("Hello NPC.");
+        expect(element.querySelector(".randomness-error")).toBeNull();
+    });
+
+    test("file-view main query assignments are established before its filter is resolved", async () => {
+        const source = "QueryTable: People=#npc|cr={$level}|prop:{{name}}\nSet: level=3";
+        const { plugin } = fixture({ "queries.rdm": source, "NPC.md": NPC });
+        const view = new IptView(new WorkspaceLeaf(), plugin as never);
+        const file = new TFile();
+        file.path = "queries.rdm";
+        view.file = file;
+        await view.onOpen();
+        view.setViewData(source, true);
+        for (let attempt = 0; attempt < 30 && !view.containerEl.querySelector(".randomness-output"); attempt++) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        expect(view.containerEl.querySelector(".randomness-output")?.textContent).toBe("NPC");
+    });
+
+    test("listing variable-backed declarations does not attempt substitution", async () => {
+        const { plugin, cache, read } = fixture({
+            "queries.rdm": "QueryTable: People=#npc|cr={$unknown}|link",
+            "Note.md": "", "NPC.md": NPC,
+        });
+        expect(await createApi(plugin as never).tables()).toContain("People");
+        expect(cache).not.toHaveBeenCalled();
+        expect(read.mock.calls.some(([path]) => path === "NPC.md")).toBe(false);
+    });
+
+    test("card text can select query rows with its existing orientation variable", async () => {
+        const source = "Table: Cards\nType: dictionary\ncard: [@People]\n" +
+            "QueryTable: People=#npc|cr={$turn}|prop:{{name}}\nDefault: nobody";
+        const { plugin, cache } = fixture({ "Cards.rdm": source, "NPC.md": NPC });
+        cache.mockImplementation((file) => ({
+            tags: file.path === "NPC.md" ? [{ tag: "#npc" }] : [],
+            frontmatter: file.path === "NPC.md" ? { cr: 0, rumours: ["one"] } : {},
+        }));
+        const deck: FolderDeck = {
+            name: "Cards", folderPath: "Cards", cards: [{ name: "card", textKey: "card" }],
+            settings: { flip: 0 }, state: { total: 1, remaining: [0], drawn: [], removed: [] },
+            rdmSource: source, rdmPath: "Cards.rdm", tableName: "Cards",
+        };
+        expect((await new DeckService(plugin as never).resolveDraw(deck, 0, "upright")).text).toBe("NPC");
     });
 
     test("inline and named rolls leave unused queries untouched, including imported declarations", async () => {

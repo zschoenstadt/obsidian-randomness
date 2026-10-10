@@ -5,15 +5,12 @@ import {
     noteBaseName,
     parseDirectTagCall,
     renderPropTemplate,
+    TagVariableBindings,
 } from "./mdContent";
 
-export function parseQueryTableSource(source: string): DirectTagCall {
-    const query = parseDirectTagCall(source);
+export function parseQueryTableSource(source: string, variables: TagVariableBindings = {}): DirectTagCall {
+    const query = parseDirectTagCall(source, variables);
     if (!query) throw new Error("Expected a native tag, folder, or property query.");
-    const filters = source.split(/\|prop:/i)[0];
-    if (/\{\$[^}]*\}/.test(filters)) {
-        throw new Error("QueryTable filters cannot contain RDM variable interpolation.");
-    }
     return query;
 }
 

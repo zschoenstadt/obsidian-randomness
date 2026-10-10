@@ -61,8 +61,23 @@ empty string. List properties stay comma-joined, and block rolls
 pick a note before a block — the same as inline tag rolls.
 
 **Query tables don't support `Deck: persistent`.** Use `[!...]`
-for non-repeating picks within one roll. Variables and `with`
-arguments don't change the filters at this time.
+for non-repeating picks within one roll.
+
+QueryTable filters can use the current RDM variables: tags,
+folders, property names, and values accept `{$name}` or `{name}`.
+Positional `with` arguments use `{$1}`, `{$2}`, and so on.
+Values apply when the query is called, not after the generator finishes.
+
+Each set of referenced variable values keeps its own choices and
+session draws within the roll. Changing an unrelated variable or a
+variable used only in `prop:` output doesn't replace those choices.
+`Shuffle:` resets the query's session draws for all sets of values.
+
+Direct inline tag filters receive no RDM bindings. For example,
+`rollExpression("#spell|spell-level={$level}|link")` raises an
+unavailable-variable error. A named query call through `roll()` or
+`rollExpression("[@Spells]")` uses its evaluator's normal scope.
+Existing RDM-variable evaluation inside `prop:` templates is unchanged.
 
 Queries load only when execution reaches a call or `count()`.
 Untaken branches and unselected rows do not load their queries,
@@ -78,6 +93,13 @@ Direct engine consumers can supply a
 The source takes the file and metadata callbacks; an optional
 `resolveTableName` callback supports tables discovered at runtime.
 The public API supplies these automatically.
+
+Custom `EvaluationTableSource` implementations may expose
+`variableNames(query)` to identify selection variables. The evaluator
+resolves those names once per invocation and passes their values to
+`load(name, query, variables)`. The shared tag parser accepts a bindings
+object as its second argument. It defaults to an empty object;
+substitutions happen inside fields without changing their separators.
 
 The existing synchronous methods still work for ordinary tables
 and already materialized rows. Query declarations without a source

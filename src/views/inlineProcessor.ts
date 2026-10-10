@@ -568,6 +568,7 @@ export async function evaluateInlineExpression(
         diceTrace?: DiceTraceEntry[];
     }
 ): Promise<string> {
+    const tagCall = parseDirectTagCall(expr, {});
     const { vault } = plugin.app;
     const settings = plugin.settings;
 
@@ -602,7 +603,6 @@ export async function evaluateInlineExpression(
     // bundle-build time — after prefetch has already run — so those
     // files must be fetched here and layered onto the sync source.
     let syncSource: FileSource = prefetch.source;
-    const tagCall = parseDirectTagCall(expr);
     // Only block rolls need the candidates' text — link and prop rolls
     // are built entirely from paths and the metadata cache, so reading
     // notes off disk would be pure waste, and they see every match.

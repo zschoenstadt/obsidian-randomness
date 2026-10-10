@@ -2,7 +2,7 @@ import { Evaluator } from "../../src/engine/evaluator";
 import { parseGeneratorFile } from "../../src/engine/fileParser";
 import { translateDiceExpression } from "../../src/compat/diceCompat";
 import { inMemorySource } from "../../src/resolver/fileResolver";
-import { matchesTagRollFilter, parseDirectTagCall } from "../../src/resolver/mdContent";
+import { matchesTagRollFilter, parseDirectTagCall, tagVariableNames } from "../../src/resolver/mdContent";
 import { createQueryTableSource } from "../../src/resolver/queryTables";
 import { buildInlineBundle } from "../../src/resolver/scope";
 
@@ -81,6 +81,51 @@ describe("list membership", () => {
 });
 
 describe("operator queries across inline and named tables", () => {
+    test("variables combine with nested numeric comparisons and list membership", async () => {
+        const metadata = {
+            "A.md": { Stats: { "challenge-rating": 2, Types: ["undead"] } },
+            "B.md": { Stats: { "challenge-rating": 4, Types: ["undead"] } },
+            "C.md": { Stats: { "challenge-rating": 4, Types: ["fey"] } },
+        };
+        const expression = "#monster|{$property}>={$minimum}|stats.challenge-rating<={$maximum}|" +
+            "stats.types has {$kind}|prop:{{name}} CR {{stats.challenge-rating}}";
+        expect(tagVariableNames(expression)).toEqual(["property", "minimum", "maximum", "kind"]);
+        const main = parseGeneratorFile(
+            "Table: Main\nSet: property=stats.challenge-rating\nSet: minimum=3\nSet: maximum=5\n" +
+            "Set: kind=undead\n[@Q] / {kind=='fey'}[@Q] / {kind=='undead'}[@Q]\nQueryTable: Q=" + expression
+        );
+        const files = jest.fn((filter: Parameters<typeof matchesTagRollFilter>[2]) =>
+            Object.keys(metadata).filter((path) =>
+                matchesTagRollFilter(new Set(["monster"]), metadata[path as keyof typeof metadata], filter, path)
+            )
+        );
+        const source = createQueryTableSource({ main, extras: [], loadedPaths: [] }, {
+            source: { read: async () => null, exists: async () => false },
+            files, frontmatter: (path) => metadata[path as keyof typeof metadata],
+        });
+        expect(await new Evaluator(main, [], { tableSource: source }).runAsync())
+            .toBe("B CR 4 / C CR 4 / B CR 4");
+        expect(files).toHaveBeenCalledTimes(2);
+    });
+
+    test("numeric substitutions retain literal validation and inline missing-context errors", () => {
+        for (const value of ["", "high", "4", "-1.5"]) {
+            const evaluate = (source: string, variables = {}) => {
+                try {
+                    return parseDirectTagCall(source, variables);
+                } catch (error: unknown) {
+                    return error instanceof Error ? error.message.replace(source.split("|")[1], "filter") : error;
+                }
+            };
+            expect(evaluate("*|cr>={$value}|link", { value }))
+                .toEqual(evaluate(`*|cr>=${value}|link`));
+        }
+        expect(() => parseDirectTagCall("#monster|stats.types has {$kind}|link", {}))
+            .toThrow("isn't available in this context");
+        expect(parseDirectTagCall("*|types has {$kind}|link", { kind: "A,B" })?.filter.props)
+            .toEqual([{ key: "types", values: ["A,B"], operator: "has" }]);
+    });
+
     test("combined build supports comparisons and membership in nested properties", async () => {
         const fm = { Stats: { "challenge-rating": "4", Types: ["undead", "fey"] } };
         const expression = "#monster|stats.challenge-rating>=3|stats.challenge-rating<5|stats.types has undead|prop:{{stats.challenge-rating}}";

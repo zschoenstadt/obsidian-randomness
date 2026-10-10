@@ -56,6 +56,12 @@ export function parseContent(source: string): Node[] {
     return p.parseUntilEnd();
 }
 
+export function variableName(source: string): string | undefined {
+    const name = source.trim();
+    return name.match(/^\$?([A-Za-z_][A-Za-z0-9_]*)$/)?.[1]
+        ?? name.match(/^\$(\d+)$/)?.[1];
+}
+
 /**
  * Cursor-based reader over content text.
  */
@@ -268,16 +274,8 @@ class ContentReader {
 
         // Pure variable reference: {name} or {$name} — identifier only, no operators or whitespace
         // Match: optional $, then identifier chars
-        const varMatch = expressionSource.match(/^\$?([A-Za-z_][A-Za-z0-9_]*)$/);
-        if (varMatch) {
-            return { type: "variable", name: varMatch[1] };
-        }
-
-        // Special: {$1}, {$2} for table parameters — purely numeric after $
-        const paramMatch = expressionSource.match(/^\$(\d+)$/);
-        if (paramMatch) {
-            return { type: "variable", name: paramMatch[1] };
-        }
+        const name = variableName(expressionSource);
+        if (name !== undefined) return { type: "variable", name };
 
         // Pure dice expression: NdN, NdN+N, NdN-N, ndn*n, etc.
         // We're lenient: any expression containing only digits, d/D, +-*/, spaces, parens.

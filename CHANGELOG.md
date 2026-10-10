@@ -16,6 +16,12 @@ All notable changes to the Randomness plugin.
   `prop:-` now work in tag rolls, including query tables.
 
 ### Added
+- **Use variables in query-table filters.** Tags, folders, property
+  names, and values accept `{$name}`; `with` arguments use `{$1}`
+  and so on. Calls follow the current values, with separate session
+  draws for each set of filter values. Unrelated variables don't
+  change the choices. Direct inline filter variables report missing
+  context; existing `prop:` output behavior is unchanged.
 - **Give a tag roll a table name.** Write
   `QueryTable: Merchants=#npc|#merchant|link`, then use
   `[@Merchants]` anywhere in your generator. Folders, properties,
@@ -25,7 +31,7 @@ All notable changes to the Randomness plugin.
 
   Ask for several with `[@3 Merchants >> implode]`, or draw without
   repeats with `[!3 Merchants >> implode]`. Query tables **don't
-  support `Deck: persistent`**. Filters are fixed text. A count,
+  support `Deck: persistent`**. A count,
   `|unique`, or `|sep:` in the tag roll is accepted without changing
   the table's entries.
 

@@ -53,8 +53,7 @@ Your notes are checked again each time you roll.
 `[@3 Merchants >> implode]` picks three,
 and `[!3 Merchants >> implode]` picks three different notes.
 That lasts for this roll only: query tables don't support
-`Deck: persistent`. The tags and property filters are fixed text,
-not variables. No Dataview needed.
+`Deck: persistent`. No Dataview needed.
 
 ## Make some results rarer
 
@@ -89,6 +88,21 @@ Doctor Pickle
 Lady Ravensworth
 The Postman
 ```
+
+Variables can also choose which notes a query table picks:
+
+```randomness
+Table: Spell
+Set: level=1
+[@Spells]
+
+QueryTable: Spells=#spell|spell-level={$level}|prop:{{link}}
+Default: no level-1 spells in your notes yet
+```
+
+Change `level` and the next call picks spells at that level.
+This works through named query tables; putting `{$level}` in a
+direct inline tag filter doesn't supply it with RDM variables.
 
 ## If this, then that
 

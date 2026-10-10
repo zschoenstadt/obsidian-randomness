@@ -3,7 +3,7 @@ import { EvaluationTableSource, LoadedTables } from "../engine/evaluator";
 import { RNG } from "../engine/rng";
 import { AsyncFileSource, prefetchUseGraph } from "./asyncPrefetcher";
 import { dirname, ResolvedBundle, resolveBundle } from "./fileResolver";
-import { extractNoteBlocks, sampleTagFiles, TAG_FILE_CAP, TagRollFilter } from "./mdContent";
+import { extractNoteBlocks, sampleTagFiles, TAG_FILE_CAP, TagRollFilter, TagVariableBindings, tagVariableNames } from "./mdContent";
 import { nativeQueryItems, parseQueryTableSource } from "./nativeQuery";
 
 export interface QueryTableOptions {
@@ -26,7 +26,8 @@ export function createQueryTableSource(input: ResolvedBundle, opts: QueryTableOp
     const blocks = new Map<string, string>();
     const blockPaths = new Map<string, string>();
     let rng: RNG | undefined;
-    let queryCount = 0;
+    const loadedQueries = new Set<TableDecl>();
+    const variables = new WeakMap<TableDecl, string[]>();
     let discoveredCount = 0;
     const source: AsyncFileSource = {
         exists: (path) => opts.source.exists(path),
@@ -68,12 +69,15 @@ export function createQueryTableSource(input: ResolvedBundle, opts: QueryTableOp
         return name;
     }
 
-    async function loadQuery(table: TableDecl): Promise<LoadedTables> {
+    async function loadQuery(table: TableDecl, bindings: TagVariableBindings): Promise<LoadedTables> {
         const declaration = table.query;
         if (!declaration) throw new Error(`Table '${table.name}' is not a query.`);
-        if (++queryCount > 64) throw new Error("QueryTable loading exceeded the 64-query limit.");
+        if (!loadedQueries.has(table) && loadedQueries.size >= 64) {
+            throw new Error("QueryTable loading exceeded the 64-query limit.");
+        }
+        loadedQueries.add(table);
         try {
-            const query = parseQueryTableSource(declaration.source);
+            const query = parseQueryTableSource(declaration.source, bindings);
             const key = JSON.stringify({ filter: query.filter, block: query.mode === "block" });
             let paths = candidates.get(key);
             if (!paths) {
@@ -97,8 +101,16 @@ export function createQueryTableSource(input: ResolvedBundle, opts: QueryTableOp
     }
 
     return {
-        async load(name, query) {
-            if (query) return loadQuery(query);
+        variableNames(query) {
+            let names = variables.get(query);
+            if (!names) {
+                names = tagVariableNames(query.query?.source ?? "");
+                variables.set(query, names);
+            }
+            return names;
+        },
+        async load(name, query, bindings = {}) {
+            if (query) return loadQuery(query, bindings);
             const path = blockPaths.get(name.toLowerCase());
             if (path) {
                 const content = await source.read(path);
@@ -139,7 +151,8 @@ export function createQueryTableSource(input: ResolvedBundle, opts: QueryTableOp
             loadedPaths.clear();
             for (const path of input.loadedPaths) loadedPaths.add(path);
             rng = undefined;
-            queryCount = discoveredCount = 0;
+            loadedQueries.clear();
+            discoveredCount = 0;
         },
     };
 }

@@ -1360,8 +1360,38 @@ supported.
 If the first table is a query table, it is the main table as usual.
 
 **`Deck: persistent` is not supported on query tables.** `[!...]`
-draws without repeats for the current roll only. Filters are fixed
-text: variables and `with` arguments don't change which notes match.
+draws without repeats for the current roll only.
+
+Query tables can use RDM variables in tags, folders, property names,
+and values:
+
+```text
+Table: Spellbook
+Set: level=1
+[@Spells] / {level==2}[@Spells]
+
+QueryTable: Spells=#spell|spell-level={$level}|prop:{{link}}
+Default: no spell at that level
+```
+
+The first call picks a level-1 spell; the second picks a level-2
+spell. Each call uses the values at that point in the roll.
+`{$name}` and `{name}` work, and `with` supplies `{$1}`, `{$2}`,
+and so on. For example, `[@Spells with 3]` can call a query whose
+filter is `spell-level={$1}`.
+
+Values stay literal: a variable containing `A,B` is one value, not
+two alternatives. Write `region={$a},{$b}` for two alternatives.
+Changing an unrelated variable doesn't change the query's choices.
+With `[!Spells]`, each set of filter values has its own remaining
+choices; switching back resumes where you left off.
+`Shuffle: Spells` resets those choices for every set of values.
+
+Direct inline tag rolls don't supply RDM variables to filters:
+`` `rdm:#spell|spell-level={$level}|link` `` raises an unavailable
+variable error. Use a named call such as `` `rdm:[@Spells]` ``.
+RDM variables in `prop:` output still work as before, alongside
+the chosen note's `{{property}}` placeholders.
 
 Unlike ordinary item lines, `//` stays literal in a `QueryTable:`
 line, so URLs in a template don't get cut off. Put comments on

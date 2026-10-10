@@ -78,7 +78,8 @@ export interface LoadedTables {
 }
 
 export interface EvaluationTableSource {
-    load(name: string, query?: TableDecl): Promise<LoadedTables | undefined>;
+    variableNames?(query: TableDecl): readonly string[];
+    load(name: string, query?: TableDecl, variables?: Readonly<Record<string, Value>>): Promise<LoadedTables | undefined>;
     clear(): void;
 }
 
@@ -235,7 +236,7 @@ export class Evaluator {
     /** Lazy assignments for Define: vars — re-evaluated each use. */
     private defines: Map<string, string> = new Map();
     /** Deck-pick state: tableName → indexes still available. Reset per top-level rep. */
-    private deckState: Map<string, Set<number>> = new Map();
+    private deckState: Map<string | TableDecl, Set<number>> = new Map();
     private formatting: "html" | "text" = "html";
     /** Current nesting depth of runTable; guarded against maxRecursionDepth. */
     private callDepth = 0;
@@ -256,7 +257,7 @@ export class Evaluator {
     private maxDepth: number;
     private initialized = false;
     private evaluating = false;
-    private queryResults = new Map<TableDecl, TableDecl>();
+    private queryResults = new Map<TableDecl, Map<string, TableDecl>>();
 
     constructor(
         private file: GeneratorFile,
@@ -321,7 +322,7 @@ export class Evaluator {
 
     private *applyAssignments(assignments: Assignment[]): Execution<void> {
         for (const assignment of assignments) {
-            if (assignment.kind === "define") this.defines.set(assignment.name, assignment.valueSource);
+            if (assignment.kind === "define") this.defines.set(Evaluator.varKey(assignment.name), assignment.valueSource);
             else this.setVar(assignment.name, yield* this.renderRawText(assignment.valueSource));
         }
     }
@@ -517,20 +518,27 @@ export class Evaluator {
 
     private *preparedTable(table: TableDecl): Execution<TableDecl> {
         if (!table.query) return table;
-        const cached = this.queryResults.get(table);
-        if (cached) return cached;
         if (!this.opts.tableSource) {
             throw new Error(`QueryTable '${table.name}' must be prepared with a native query provider before evaluation.`);
         }
-        const loaded = yield* waitFor(this.opts.tableSource.load(table.name, table));
+        const bindings: [string, string][] = [];
+        for (const name of this.opts.tableSource.variableNames?.(table) ?? []) {
+            bindings.push([name, String(yield* this.queryVariable(name))]);
+        }
+        const key = JSON.stringify(bindings);
+        let instances = this.queryResults.get(table);
+        const cached = instances?.get(key);
+        if (cached) return cached;
+        const loaded = yield* waitFor(this.opts.tableSource.load(table.name, table, Object.fromEntries(bindings)));
         if (!loaded?.table || loaded.table.query ||
             loaded.table.name.toLowerCase() !== table.name.toLowerCase()) {
             throw new Error(`QueryTable '${table.name}' could not be loaded.`);
         }
-        this.queryResults.set(table, loaded.table);
-        if (this.tables.get(table.name.toLowerCase()) === table) {
-            this.tables.set(table.name.toLowerCase(), loaded.table);
+        if (!instances) {
+            instances = new Map();
+            this.queryResults.set(table, instances);
         }
+        instances.set(key, loaded.table);
         yield* this.addLoadedFiles(loaded.files);
         return loaded.table;
     }
@@ -542,11 +550,10 @@ export class Evaluator {
             if (loaded) yield* this.addLoadedFiles(loaded.files);
             table = this.tables.get(name.toLowerCase());
         }
-        return table ? yield* this.preparedTable(table) : undefined;
+        return table;
     }
 
     private *runTable(table: TableDecl, params: string[]): Execution<string> {
-        table = yield* this.preparedTable(table);
         // Recursion guard — see RecursionLimitError. We check BEFORE
         // incrementing so the error names the table that tipped us over,
         // not the one that would have run next.
@@ -570,6 +577,7 @@ export class Evaluator {
             }
             // Apply in-table Sets/Defines
             yield* this.applyAssignments(table.inTableSets);
+            table = yield* this.preparedTable(table);
             // Pick an item
             const picked = yield* this.pickItem(table);
             if (!picked) {
@@ -700,7 +708,7 @@ export class Evaluator {
     }
 
     /** Pick a single deck-pick item from a table (no duplicates within shuffle). */
-    private pickDeckItem(table: TableDecl): TableItem | null {
+    private pickDeckItem(table: TableDecl, declaration: TableDecl): TableItem | null {
         // Persistent table decks (`Deck: persistent`) draw through
         // the host, whose state outlives this evaluator. Without a
         // host (tests, API contexts) they fall back to the per-run
@@ -710,7 +718,7 @@ export class Evaluator {
             const idx = this.opts.deckHost.draw(table.name, weights);
             return idx === null ? null : table.items[idx] ?? null;
         }
-        const key = table.name.toLowerCase();
+        const key = declaration.query ? table : table.name.toLowerCase();
         let avail = this.deckState.get(key);
         if (!avail) {
             avail = new Set();
@@ -758,6 +766,9 @@ export class Evaluator {
         if (table?.deckPersistent === true && this.opts.deckHost) {
             this.opts.deckHost.reset(table.name);
             return;
+        }
+        if (table?.query) {
+            for (const instance of this.queryResults.get(table)?.values() ?? []) this.deckState.delete(instance);
         }
         this.deckState.delete(name.toLowerCase());
     }
@@ -818,7 +829,7 @@ export class Evaluator {
             }
             case "variable": {
                 if (this.hasVar(n.name)) return String(this.getVar(n.name));
-                const def = this.defines.get(n.name);
+                const def = this.defines.get(Evaluator.varKey(n.name));
                 if (def !== undefined) {
                     // Re-evaluate the define lazily each time it's referenced
                     return yield* this.renderRawText(def);
@@ -967,7 +978,7 @@ export class Evaluator {
 
     private *runSubtablePickNode(n: import("./ast").SubtablePickNode): Execution<string> {
         const tableName = yield* this.renderRawText(n.tableSource);
-        const table = yield* this.evaluationTable(tableName);
+        let table = yield* this.evaluationTable(tableName);
         // See runSubtableRollNode: throwing rather than silently
         // returning "" so missing-table mistakes surface as errors.
         if (!table) throw new Error(`Unknown table: ${tableName}`);
@@ -1019,6 +1030,7 @@ export class Evaluator {
                 this.setVar(k, params[i]);
             }
             try {
+                table = yield* this.preparedTable(table);
                 const picked = yield* this.pickItem(table, idx);
                 if (picked) {
                     // Track the picked sub-table item's position too,
@@ -1105,18 +1117,6 @@ export class Evaluator {
         if (!table) throw new Error(`Unknown table: ${tableName}`);
         const results: string[] = [];
         for (let i = 0; i < reps; i++) {
-            const item = this.pickDeckItem(table);
-            if (!item) break;
-            // Orientation: a Flip: table sets {$facing} per draw, so
-            // the item's own content can branch on it.
-            if (table.flipChance !== undefined) {
-                const facing = rollFacing(
-                    { flip: table.flipChance, turn: table.turnMode },
-                    () => this.rng.next()
-                );
-                this.setVar("facing", facing);
-                this.setVar("turn", String(facingTurns(facing)));
-            }
             // Render with params
             const savedParams: { name: string; value?: Value }[] = [];
             for (let j = 0; j < params.length; j++) {
@@ -1125,6 +1125,18 @@ export class Evaluator {
                 this.setVar(k, params[j]);
             }
             try {
+                const instance = yield* this.preparedTable(table);
+                const item = this.pickDeckItem(instance, table);
+                if (!item) break;
+                // Orientation is set after choosing an item, as for ordinary decks.
+                if (instance.flipChance !== undefined) {
+                    const facing = rollFacing(
+                        { flip: instance.flipChance, turn: instance.turnMode },
+                        () => this.rng.next()
+                    );
+                    this.setVar("facing", facing);
+                    this.setVar("turn", String(facingTurns(facing)));
+                }
                 results.push(yield* this.renderNodes(this.parseItem(item)));
             } finally {
                 for (const sp of savedParams) {
@@ -1199,8 +1211,20 @@ export class Evaluator {
      */
     private *expressionVariable(name: string, coerce: (value: Value) => Value): Execution<Value> {
         if (this.hasVar(name)) return coerce(this.getVar(name)!);
-        const definition = this.defines.get(name);
+        const definition = this.defines.get(Evaluator.varKey(name));
         return definition === undefined ? "" : coerce(yield* this.renderRawText(definition));
+    }
+
+    private *queryVariable(name: string): Execution<Value> {
+        if (this.hasVar(name)) return this.getVar(name)!;
+        if (!this.defines.has(Evaluator.varKey(name))) return "";
+        if (this.callDepth >= this.maxDepth) throw new RecursionLimitError(this.maxDepth, name);
+        this.callDepth++;
+        try {
+            return yield* this.expressionVariable(name, (value) => value);
+        } finally {
+            this.callDepth--;
+        }
     }
 
     private *countTableItems(rawNameSource: string): Execution<number> {
@@ -1216,7 +1240,7 @@ export class Evaluator {
         // Same posture as [@Table] / [#Table]: an unknown table is an
         // authoring mistake and should surface, not silently roll 1d0.
         if (!table) throw new Error(`Unknown table: ${name}`);
-        return table.items.length;
+        return (yield* this.preparedTable(table)).items.length;
     }
 
     private filterContext(): FilterExecutionContext {

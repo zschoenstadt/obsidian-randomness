@@ -1178,8 +1178,8 @@ to pick a range:
 
 Numbers and numeric text both work — `cr: 4` and `cr: "4"` match
 the same range. Missing or nonnumeric values don't match. For a
-list of numbers, any matching entry is enough. The value after a
-comparison must be a number; `cr>high` raises an error.
+list of numbers, any matching entry is enough. Use a number for a
+comparison, or `*` for existence as below; `cr>high` raises an error.
 
 `has` checks whether a **list** has a particular item:
 
@@ -1190,11 +1190,16 @@ comparison must be a number; `cr>high` raises an error.
 
 `types: [fey, undead]` matches either example. Capital letters don't
 matter, but the whole item must match: `undead warrior` isn't
-`undead`. A plain text property doesn't match `has`; use `=`
-for that. Commas mean OR, just as with equality, and link names
-and aliases still count. `has *` looks for a literal `*`
-item, not any item. `folder=` remains a folder filter; it doesn't
-take comparison operators or `has`.
+`undead`. With a named item, a plain text property doesn't match
+`has`; use `=` for that. Commas mean OR, just as with equality,
+and link names and aliases still count.
+
+**`*` means "property exists" with every property operator.**
+`cr=*`, `cr>*`, `cr<=*`, and `cr has *` all match the same notes:
+those with a non-empty `cr`, whether it's a number, text, or a list
+with a non-empty entry. Missing or empty properties don't match.
+It isn't a literal star or a numeric threshold. `folder=` remains
+a folder filter; it doesn't take comparison operators or `has`.
 
 Tag rolls use Obsidian's own metadata cache — no Dataview required.
 The note pick happens inside the engine, so seeded rolls are

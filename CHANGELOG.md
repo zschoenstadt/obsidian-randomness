@@ -4,6 +4,11 @@ All notable changes to the Randomness plugin.
 
 ## Unreleased
 
+### Fixed
+- **`*` checks property existence with every operator.** Equality,
+  numeric comparisons, and `has` all accept it and match a non-empty
+  property. `has *` no longer looks for a literal star item.
+
 ### Added
 - **Pick tag rolls by a range or a list item.** `cr>=3|cr<=5`
   finds CR 3 through 5; `types has undead` finds a list with
